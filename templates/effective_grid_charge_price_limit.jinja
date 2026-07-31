@@ -1,0 +1,39 @@
+{% set normal_price_raw = states('input_number.maximum_grid_charge') %}
+{% set cloudy_price_raw = states('input_number.cloudy_day_grid_price') %}
+{% set weather_state = states('weather.forecast_home') | lower %}
+{% set cloudy_price_approved = is_state(
+  'input_select.hems_cloudy_day_grid_charge_decision',
+  'approved'
+) %}
+
+{% set cloudy_conditions = [
+  'partlycloudy',
+  'cloudy',
+  'overcast',
+  'rainy',
+  'pouring',
+  'lightning',
+  'lightning-rainy',
+  'hail',
+  'fog',
+  'snowy',
+  'snowy-rainy'
+] %}
+
+{% if not is_number(normal_price_raw) %}
+  {{ none }}
+{% else %}
+  {% set normal_price = [normal_price_raw | float, 0] | max %}
+  {% set cloudy_day = weather_state in cloudy_conditions %}
+
+  {% if
+    cloudy_day
+    and cloudy_price_approved
+    and is_number(cloudy_price_raw)
+  %}
+    {% set cloudy_price = [cloudy_price_raw | float, 0] | max %}
+    {{ [normal_price, cloudy_price] | max | round(4) }}
+  {% else %}
+    {{ normal_price | round(4) }}
+  {% endif %}
+{% endif %}

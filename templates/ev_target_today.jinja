@@ -1,0 +1,9 @@
+{% set normal_target_raw = states('input_number.ev_target') %}
+
+{% if is_state('input_boolean.hems_ev_long_drive_today', 'on') %}
+  100
+{% elif is_number(normal_target_raw) %}
+  {{ ([[normal_target_raw | float, 0] | max, 100] | min) | round(0) | int }}
+{% else %}
+  unknown
+{% endif %}

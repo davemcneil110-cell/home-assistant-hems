@@ -1,0 +1,65 @@
+alias: HEMS - Record Overnight Start
+description: >-
+  Opens one overnight measurement window after useful solar has finished. It
+  records both Powerwall SOC and the current daily house-energy total. A
+  five-minute fallback makes the recorder survive Home Assistant restarts or a
+  missed threshold crossing. It records at most once per calendar evening.
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.hems_effective_solar_power
+    below: 0.1
+    for: "00:20:00"
+
+  - trigger: time_pattern
+    minutes: "/5"
+
+conditions:
+  - condition: time
+    after: "15:00:00"
+    before: "23:59:59"
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states('sensor.hems_effective_solar_power'))
+        and states('sensor.hems_effective_solar_power') | float < 0.1
+      }}
+
+  - condition: template
+    value_template: >-
+      {% set remaining = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+      {{ is_number(remaining) and (remaining | float) < 0.2 }}
+
+  - condition: template
+    value_template: >-
+      {% set last = state_attr('automation.hems_record_overnight_start', 'last_triggered') %}
+      {{ last is none or as_local(as_datetime(last)).date() != now().date() }}
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states('sensor.hems_powerwall_percentage'))
+        and is_number(states('sensor.house_home_energy_gateway_teslemetry_house_used_today'))
+      }}
+
+actions:
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_start_powerwall
+    data:
+      value: >-
+        {{ states('sensor.hems_powerwall_percentage') | float | round(0) }}
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_start_house_energy
+    data:
+      value: >-
+        {{
+          states('sensor.house_home_energy_gateway_teslemetry_house_used_today')
+          | float
+          | round(2)
+        }}
+
+mode: single
+max_exceeded: silent

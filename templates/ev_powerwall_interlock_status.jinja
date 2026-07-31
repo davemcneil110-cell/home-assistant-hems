@@ -1,0 +1,62 @@
+{% set session_active = states(
+  'input_boolean.hems_ev_worker_session_active'
+) %}
+{% set request = states('sensor.hems_ev_powerwall_interlock_request') %}
+{% set desired_mode = states('sensor.hems_coordinated_powerwall_mode') %}
+{% set desired_reserve_raw = states(
+  'sensor.hems_coordinated_powerwall_reserve'
+) %}
+{% set actual_mode = states(
+  'select.house_home_energy_gateway_teslemetry_operation_mode'
+) %}
+{% set actual_reserve_raw = states(
+  'number.house_home_energy_gateway_teslemetry_backup_reserve'
+) %}
+{% set valid_requests = [
+  'REQUEST_CHEAP_GRID_CHARGE_AND_HOLD',
+  'REQUEST_CHEAP_GRID_HOLD_ONLY',
+  'REQUEST_URGENT_HOLD_ONLY',
+  'REQUEST_APPROVED_HOLD_ONLY',
+  'REQUEST_EARLY_FLEXIBLE_DISCHARGE'
+] %}
+
+{% if session_active not in ['on', 'off'] %}
+  INPUT_UNAVAILABLE
+
+{% elif session_active == 'off' %}
+  NOT_REQUESTED
+
+{% elif is_state('input_boolean.hems_powerwall_manual_override', 'on') %}
+  MANUAL_OVERRIDE
+
+{% elif is_state('input_boolean.automatic_grid_charging_enabled', 'off') %}
+  AUTOMATION_DISABLED
+
+{% elif request not in valid_requests
+      or desired_mode not in ['backup', 'self_consumption']
+      or not is_number(desired_reserve_raw) %}
+  INPUT_UNAVAILABLE
+
+{% elif request == 'REQUEST_EARLY_FLEXIBLE_DISCHARGE'
+      and desired_mode != 'self_consumption' %}
+  INPUT_UNAVAILABLE
+
+{% elif request != 'REQUEST_EARLY_FLEXIBLE_DISCHARGE'
+      and desired_mode != 'backup' %}
+  INPUT_UNAVAILABLE
+
+{% elif actual_mode not in ['backup', 'self_consumption']
+      or not is_number(actual_reserve_raw) %}
+  DEVICE_UNAVAILABLE
+
+{% elif actual_mode == desired_mode
+      and (
+        (
+          (actual_reserve_raw | float) - (desired_reserve_raw | float)
+        ) | abs
+      ) < 0.5 %}
+  READY
+
+{% else %}
+  WAITING_FOR_POWERWALL
+{% endif %}

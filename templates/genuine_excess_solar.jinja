@@ -1,0 +1,31 @@
+{% set solar_raw = states('sensor.hems_effective_solar_power') %}
+{% set grid_raw = states('sensor.hems_effective_grid_power') %}
+{% set battery_raw = states('sensor.hems_effective_battery_power') %}
+{% set previous = this.state if this is defined else 'UNKNOWN' %}
+
+{% if not is_number(solar_raw)
+      or not is_number(grid_raw)
+      or not is_number(battery_raw) %}
+  INPUT_UNAVAILABLE
+{% else %}
+  {% set solar_kw = solar_raw | float %}
+  {% set grid_kw = grid_raw | float %}
+  {% set battery_kw = battery_raw | float %}
+
+  {% if battery_kw > 0.2 %}
+    BLOCK_POWERWALL_DISCHARGING
+  {% elif grid_kw > 0.2 %}
+    BLOCK_GRID_IMPORTING
+  {% elif previous == 'AVAILABLE'
+        and solar_kw >= 0.5
+        and grid_kw <= 0.2
+        and battery_kw <= 0.2 %}
+    AVAILABLE
+  {% elif solar_kw >= 1.5
+        and grid_kw <= -1.5
+        and battery_kw <= 0.2 %}
+    AVAILABLE
+  {% else %}
+    WAITING_FOR_SURPLUS
+  {% endif %}
+{% endif %}

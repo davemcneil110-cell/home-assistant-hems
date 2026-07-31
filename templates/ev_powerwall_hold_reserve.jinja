@@ -1,0 +1,55 @@
+{# Full state template. Revised 2026-07-31.
+   Teslemetry did not retain a 99% reserve during live commissioning, so only
+   that unstable request is normalised to the supported 100% endpoint. #}
+{% set active = states('input_boolean.hems_ev_worker_session_active') %}
+{% set session_type = states('input_select.hems_ev_worker_session_type') %}
+{% set start_soc_raw = states(
+  'input_number.hems_ev_session_start_powerwall_soc'
+) %}
+{% set target_raw = states('input_number.powerwall_target') %}
+{% set simultaneous = states(
+  'input_boolean.hems_simultaneous_grid_charging_allowed'
+) %}
+{% set after_midday = now() >= today_at('12:00:00') %}
+
+{% if active != 'on' %}
+  unknown
+
+{% elif session_type not in [
+  'cheap_grid',
+  'urgent_recovery',
+  'approved_recovery'
+] %}
+  unknown
+
+{% elif not is_number(start_soc_raw) %}
+  unknown
+
+{% elif session_type == 'cheap_grid'
+      and simultaneous not in ['on', 'off'] %}
+  unknown
+
+{% elif not is_number(target_raw) %}
+  unknown
+
+{% else %}
+  {% set start_soc = start_soc_raw | float %}
+  {% set target = target_raw | float %}
+
+  {# At and after midday the companion latch guarantees start_soc is at least
+     80 and raises it whenever a higher real SOC is reached. Do not cap this
+     value at the ordinary target: that would lower a Powerwall already above
+     80 and allow it to discharge into the EV. Before midday preserve the
+     commissioned early-flexible behaviour. #}
+  {% if after_midday %}
+    {% set requested = [start_soc, 80] | max %}
+  {% elif session_type == 'cheap_grid' and simultaneous == 'on' %}
+    {% set requested = target %}
+  {% else %}
+    {% set requested = [start_soc, target] | min %}
+  {% endif %}
+  {% set bounded = [[requested, 0] | max, 100] | min %}
+  {# Teslemetry repeatedly reverted a 99% reserve request during live
+     commissioning. Use the stable full-reserve endpoint for 99 only. #}
+  {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+{% endif %}

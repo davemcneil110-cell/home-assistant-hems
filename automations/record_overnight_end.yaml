@@ -1,0 +1,157 @@
+alias: HEMS - Record Overnight End
+description: >-
+  Closes one overnight measurement window when useful solar returns. It uses
+  the healthy HEMS Effective Solar Power sensor, calculates actual household
+  energy used across midnight, records Powerwall contribution, and maintains a
+  cumulative average over all valid overnight samples. A five-minute fallback
+  survives restarts and missed threshold crossings. It records at most once per
+  morning.
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.hems_effective_solar_power
+    above: 0.3
+    for: "00:10:00"
+
+  - trigger: time_pattern
+    minutes: "/5"
+
+conditions:
+  - condition: time
+    after: "05:00:00"
+    before: "12:00:00"
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states('sensor.hems_effective_solar_power'))
+        and states('sensor.hems_effective_solar_power') | float > 0.5
+      }}
+
+  - condition: numeric_state
+    entity_id: input_number.hems_overnight_start_powerwall
+    above: 0
+
+  - condition: template
+    value_template: >-
+      {% set last = state_attr('automation.hems_record_overnight_end', 'last_triggered') %}
+      {{ last is none or as_local(as_datetime(last)).date() != now().date() }}
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states('sensor.hems_powerwall_percentage'))
+        and is_number(states('input_number.hems_overnight_start_house_energy'))
+        and is_number(states('sensor.house_home_energy_gateway_teslemetry_house_used_today'))
+        and is_number(states('input_number.hems_overnight_usage_average'))
+        and is_number(states('input_number.hems_overnight_usage_sample_count'))
+      }}
+
+actions:
+  - variables:
+      powerwall_start_pct: >-
+        {{ states('input_number.hems_overnight_start_powerwall') | float }}
+      powerwall_end_pct: >-
+        {{ states('sensor.hems_powerwall_percentage') | float }}
+      powerwall_capacity_kwh: 13.5
+      house_start_kwh: >-
+        {{ states('input_number.hems_overnight_start_house_energy') | float }}
+      house_end_kwh: >-
+        {{
+          states('sensor.house_home_energy_gateway_teslemetry_house_used_today')
+          | float
+        }}
+      previous_day_house_total_raw: >-
+        {{
+          state_attr(
+            'sensor.house_home_energy_gateway_teslemetry_house_used_today',
+            'last_period'
+          )
+        }}
+      start_triggered: >-
+        {{ state_attr('automation.hems_record_overnight_start', 'last_triggered') }}
+      old_average: >-
+        {{ states('input_number.hems_overnight_usage_average') | float(0) }}
+      old_sample_count: >-
+        {{ states('input_number.hems_overnight_usage_sample_count') | int(0) }}
+
+  - variables:
+      crossed_midnight: >-
+        {{
+          start_triggered is not none
+          and as_local(as_datetime(start_triggered)).date() < now().date()
+        }}
+      powerwall_energy_used: >-
+        {{
+          [
+            ((powerwall_start_pct - powerwall_end_pct) / 100)
+            * (powerwall_capacity_kwh | float),
+            0
+          ]
+          | max
+          | round(2)
+        }}
+      overnight_house_usage: >-
+        {% if crossed_midnight and is_number(previous_day_house_total_raw) %}
+          {% set before_midnight = [
+            (previous_day_house_total_raw | float) - (house_start_kwh | float),
+            0
+          ] | max %}
+          {{ (before_midnight + (house_end_kwh | float)) | round(2) }}
+        {% else %}
+          {{ ([(house_end_kwh | float) - (house_start_kwh | float), 0] | max) | round(2) }}
+        {% endif %}
+      new_sample_count: >-
+        {{ (old_sample_count | int(0)) + 1 }}
+
+  - variables:
+      new_average: >-
+        {{
+          (
+            ((old_average | float(0)) * (old_sample_count | int(0)))
+            + (overnight_house_usage | float(0))
+          )
+          / (new_sample_count | int(1))
+          | round(2)
+        }}
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_end_powerwall
+    data:
+      value: "{{ powerwall_end_pct | round(0) }}"
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_usage
+    data:
+      value: "{{ overnight_house_usage | float(0) }}"
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_usage_average
+    data:
+      value: "{{ new_average | float(0) }}"
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_overnight_usage_sample_count
+    data:
+      value: "{{ new_sample_count | int(1) }}"
+
+  - action: notify.mobile_app_primary_phone
+    data:
+      title: "HEMS overnight usage recorded"
+      message: >-
+        The house used {{ overnight_house_usage | float(0) | round(2) }} kWh
+        between useful-solar finish and useful-solar return. Powerwall SOC moved
+        from {{ powerwall_start_pct | round(0) }}% to
+        {{ powerwall_end_pct | round(0) }}%, supplying approximately
+        {{ powerwall_energy_used | float(0) | round(2) }} kWh. The current
+        average is {{ new_average | float(0) | round(2) }} kWh over
+        {{ new_sample_count | int(1) }} valid night(s).
+      data:
+        tag: hems_overnight_usage
+        group: hems_energy_learning
+
+mode: single
+max_exceeded: silent

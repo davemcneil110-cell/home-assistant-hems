@@ -1,0 +1,31 @@
+{% set brain_mode = states('sensor.hems_expected_powerwall_mode') %}
+{% set interlock = states('sensor.hems_ev_powerwall_interlock_request') %}
+
+{% if interlock in [
+  'REQUEST_CHEAP_GRID_CHARGE_AND_HOLD',
+  'REQUEST_CHEAP_GRID_HOLD_ONLY',
+  'REQUEST_URGENT_HOLD_ONLY',
+  'REQUEST_APPROVED_HOLD_ONLY'
+] %}
+  backup
+
+{% elif interlock == 'REQUEST_EARLY_FLEXIBLE_DISCHARGE' %}
+  self_consumption
+
+{% elif interlock == 'NO_REQUEST'
+      and brain_mode in ['backup', 'self_consumption'] %}
+  {{ brain_mode }}
+
+{% elif interlock in [
+  'INPUT_UNAVAILABLE',
+  'SESSION_STATE_CONFLICT',
+  'INVALID_SESSION_TYPE',
+  'unknown',
+  'unavailable',
+  ''
+] %}
+  INTERLOCK_UNAVAILABLE
+
+{% else %}
+  BRAIN_MODE_UNAVAILABLE
+{% endif %}

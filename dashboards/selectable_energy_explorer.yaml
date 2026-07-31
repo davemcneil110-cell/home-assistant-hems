@@ -1,0 +1,1551 @@
+# HEMS Selectable Energy Explorer
+#
+# Full dashboard YAML. Create a separate dashboard and paste this entire file
+# into its Raw configuration editor. The commissioning dashboard is unchanged.
+#
+# Requirements:
+# - ApexCharts Card (already installed in this Home Assistant instance)
+# - repairs/HEMS_Energy_Attribution_Package_2026-07-30.yaml installed first
+#
+# The source-to-destination splits are estimated from simultaneous AC power
+# measurements. They are not utility-grade metering. Lifetime means since the
+# attribution package was installed; Home Assistant did not record these exact
+# routes before that date.
+
+title: HEMS Energy Explorer
+
+views:
+  - title: Energy Explorer
+    path: energy-explorer
+    icon: mdi:chart-donut-variant
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: Energy Explorer
+            icon: mdi:chart-donut-variant
+            heading_style: title
+
+          - type: entities
+            grid_options:
+              columns: full
+            title: Choose Energy View
+            show_header_toggle: false
+            entities:
+              - entity: input_select.hems_energy_source_view
+                name: Energy source
+              - entity: input_select.hems_energy_timescale
+                name: Timescale
+              - entity: sensor.hems_energy_attribution_match
+                name: Live attribution match
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              **How to read this:** choose **Solar**, **Grid**, or **Powerwall**, then choose the period. The legend shows total energy for each destination. Powerwall has separate **Used By** and **Charged From** charts.
+
+              *Detailed lifetime attribution starts when the new counters are installed. Short sensor-timing mismatches are excluded rather than assigned to an invented route.*
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Solar
+              - entity: input_select.hems_energy_timescale
+                state: Today
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 24h
+              span:
+                start: day
+              header:
+                show: true
+                title: Solar Energy — Used By — Today
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_solar_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+                - entity: sensor.hems_solar_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+                - entity: sensor.hems_solar_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+                - entity: sensor.hems_solar_to_grid_energy
+                  name: Grid export
+                  color: "#ef5350"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Solar
+              - entity: input_select.hems_energy_timescale
+                state: This Week
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 7d
+              span:
+                start: week
+              header:
+                show: true
+                title: Solar Energy — Used By — This Week
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_solar_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_grid_energy
+                  name: Grid export
+                  color: "#ef5350"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Solar
+              - entity: input_select.hems_energy_timescale
+                state: This Month
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 31d
+              span:
+                start: month
+              header:
+                show: true
+                title: Solar Energy — Used By — This Month
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_solar_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_solar_to_grid_energy
+                  name: Grid export
+                  color: "#ef5350"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Solar
+              - entity: input_select.hems_energy_timescale
+                state: This Year
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 365d
+              span:
+                start: year
+              header:
+                show: true
+                title: Solar Energy — Used By — This Year
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_solar_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+                - entity: sensor.hems_solar_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+                - entity: sensor.hems_solar_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+                - entity: sensor.hems_solar_to_grid_energy
+                  name: Grid export
+                  color: "#ef5350"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Solar
+              - entity: input_select.hems_energy_timescale
+                state: Lifetime
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              chart_type: donut
+              header:
+                show: true
+                title: Solar Energy — Used By — Since Attribution Started
+                show_states: false
+              apex_config:
+                chart:
+                  height: 360px
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const value = Number(opts.w.globals.series[opts.seriesIndex]) || 0;
+                      return seriesName + " · " + value.toFixed(1) + " kWh";
+                    }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+                dataLabels:
+                  formatter: |
+                    EVAL:function(value) {
+                      return Number(value).toFixed(0) + "%";
+                    }
+                plotOptions:
+                  pie:
+                    donut:
+                      labels:
+                        show: true
+                        total:
+                          show: true
+                          label: Total
+                          formatter: |
+                            EVAL:function(w) {
+                              const total = w.globals.seriesTotals.reduce((a, b) => a + b, 0);
+                              return total.toFixed(1) + " kWh";
+                            }
+              series:
+                - entity: sensor.hems_solar_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  float_precision: 3
+                - entity: sensor.hems_solar_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  float_precision: 3
+                - entity: sensor.hems_solar_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  float_precision: 3
+                - entity: sensor.hems_solar_to_grid_energy
+                  name: Grid export
+                  color: "#ef5350"
+                  float_precision: 3
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Grid
+              - entity: input_select.hems_energy_timescale
+                state: Today
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 24h
+              span:
+                start: day
+              header:
+                show: true
+                title: Grid Energy — Used By — Today
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_grid_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+                - entity: sensor.hems_grid_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+                - entity: sensor.hems_grid_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: hour
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Grid
+              - entity: input_select.hems_energy_timescale
+                state: This Week
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 7d
+              span:
+                start: week
+              header:
+                show: true
+                title: Grid Energy — Used By — This Week
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_grid_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_grid_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_grid_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Grid
+              - entity: input_select.hems_energy_timescale
+                state: This Month
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 31d
+              span:
+                start: month
+              header:
+                show: true
+                title: Grid Energy — Used By — This Month
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_grid_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_grid_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+                - entity: sensor.hems_grid_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: day
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Grid
+              - entity: input_select.hems_energy_timescale
+                state: This Year
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              graph_span: 365d
+              span:
+                start: year
+              header:
+                show: true
+                title: Grid Energy — Used By — This Year
+                show_states: false
+              stacked: true
+              apex_config:
+                chart:
+                  height: 340px
+                  toolbar:
+                    show: false
+                plotOptions:
+                  bar:
+                    columnWidth: 68%
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                      const total = Array.isArray(raw)
+                        ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                        : (Number(raw) || 0);
+                      return seriesName + " · " + total.toFixed(1) + " kWh";
+                    }
+                yaxis:
+                  min: 0
+                  labels:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(1) + " kWh";
+                      }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+              series:
+                - entity: sensor.hems_grid_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+                - entity: sensor.hems_grid_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+                - entity: sensor.hems_grid_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  type: column
+                  float_precision: 3
+                  statistics:
+                    type: change
+                    period: month
+                    align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Grid
+              - entity: input_select.hems_energy_timescale
+                state: Lifetime
+            card:
+              type: custom:apexcharts-card
+              update_interval: 5min
+              chart_type: donut
+              header:
+                show: true
+                title: Grid Energy — Used By — Since Attribution Started
+                show_states: false
+              apex_config:
+                chart:
+                  height: 360px
+                legend:
+                  show: true
+                  position: bottom
+                  formatter: |
+                    EVAL:function(seriesName, opts) {
+                      const value = Number(opts.w.globals.series[opts.seriesIndex]) || 0;
+                      return seriesName + " · " + value.toFixed(1) + " kWh";
+                    }
+                tooltip:
+                  y:
+                    formatter: |
+                      EVAL:function(value) {
+                        return Number(value).toFixed(2) + " kWh";
+                      }
+                dataLabels:
+                  formatter: |
+                    EVAL:function(value) {
+                      return Number(value).toFixed(0) + "%";
+                    }
+                plotOptions:
+                  pie:
+                    donut:
+                      labels:
+                        show: true
+                        total:
+                          show: true
+                          label: Total
+                          formatter: |
+                            EVAL:function(w) {
+                              const total = w.globals.seriesTotals.reduce((a, b) => a + b, 0);
+                              return total.toFixed(1) + " kWh";
+                            }
+              series:
+                - entity: sensor.hems_grid_to_home_energy
+                  name: Home
+                  color: "#5c6bc0"
+                  float_precision: 3
+                - entity: sensor.hems_grid_to_ev_energy
+                  name: BYD Atto 3
+                  color: "#42a5f5"
+                  float_precision: 3
+                - entity: sensor.hems_grid_to_powerwall_energy
+                  name: Powerwall
+                  color: "#66bb6a"
+                  float_precision: 3
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Powerwall
+              - entity: input_select.hems_energy_timescale
+                state: Today
+            card:
+              type: vertical-stack
+              cards:
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 24h
+                  span:
+                    start: day
+                  header:
+                    show: true
+                    title: Powerwall — Used By — Today
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_powerwall_to_home_energy
+                      name: Home
+                      color: "#5c6bc0"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: hour
+                        align: start
+                    - entity: sensor.hems_powerwall_to_ev_energy
+                      name: BYD Atto 3
+                      color: "#42a5f5"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: hour
+                        align: start
+                    - entity: sensor.hems_powerwall_to_grid_energy
+                      name: Grid export
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: hour
+                        align: start
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 24h
+                  span:
+                    start: day
+                  header:
+                    show: true
+                    title: Powerwall — Charged From — Today
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_solar_to_powerwall_energy
+                      name: Solar
+                      color: "#f9c74f"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: hour
+                        align: start
+                    - entity: sensor.hems_grid_to_powerwall_energy
+                      name: Grid
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: hour
+                        align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Powerwall
+              - entity: input_select.hems_energy_timescale
+                state: This Week
+            card:
+              type: vertical-stack
+              cards:
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 7d
+                  span:
+                    start: week
+                  header:
+                    show: true
+                    title: Powerwall — Used By — This Week
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_powerwall_to_home_energy
+                      name: Home
+                      color: "#5c6bc0"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_powerwall_to_ev_energy
+                      name: BYD Atto 3
+                      color: "#42a5f5"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_powerwall_to_grid_energy
+                      name: Grid export
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 7d
+                  span:
+                    start: week
+                  header:
+                    show: true
+                    title: Powerwall — Charged From — This Week
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_solar_to_powerwall_energy
+                      name: Solar
+                      color: "#f9c74f"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_grid_to_powerwall_energy
+                      name: Grid
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Powerwall
+              - entity: input_select.hems_energy_timescale
+                state: This Month
+            card:
+              type: vertical-stack
+              cards:
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 31d
+                  span:
+                    start: month
+                  header:
+                    show: true
+                    title: Powerwall — Used By — This Month
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_powerwall_to_home_energy
+                      name: Home
+                      color: "#5c6bc0"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_powerwall_to_ev_energy
+                      name: BYD Atto 3
+                      color: "#42a5f5"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_powerwall_to_grid_energy
+                      name: Grid export
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 31d
+                  span:
+                    start: month
+                  header:
+                    show: true
+                    title: Powerwall — Charged From — This Month
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_solar_to_powerwall_energy
+                      name: Solar
+                      color: "#f9c74f"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+                    - entity: sensor.hems_grid_to_powerwall_energy
+                      name: Grid
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: day
+                        align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Powerwall
+              - entity: input_select.hems_energy_timescale
+                state: This Year
+            card:
+              type: vertical-stack
+              cards:
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 365d
+                  span:
+                    start: year
+                  header:
+                    show: true
+                    title: Powerwall — Used By — This Year
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_powerwall_to_home_energy
+                      name: Home
+                      color: "#5c6bc0"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: month
+                        align: start
+                    - entity: sensor.hems_powerwall_to_ev_energy
+                      name: BYD Atto 3
+                      color: "#42a5f5"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: month
+                        align: start
+                    - entity: sensor.hems_powerwall_to_grid_energy
+                      name: Grid export
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: month
+                        align: start
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  graph_span: 365d
+                  span:
+                    start: year
+                  header:
+                    show: true
+                    title: Powerwall — Charged From — This Year
+                    show_states: false
+                  stacked: true
+                  apex_config:
+                    chart:
+                      height: 300px
+                      toolbar:
+                        show: false
+                    plotOptions:
+                      bar:
+                        columnWidth: 68%
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const raw = opts.w.globals.series[opts.seriesIndex] || [];
+                          const total = Array.isArray(raw)
+                            ? raw.reduce((sum, value) => sum + (Number(value) || 0), 0)
+                            : (Number(raw) || 0);
+                          return seriesName + " · " + total.toFixed(1) + " kWh";
+                        }
+                    yaxis:
+                      min: 0
+                      labels:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(1) + " kWh";
+                          }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                  series:
+                    - entity: sensor.hems_solar_to_powerwall_energy
+                      name: Solar
+                      color: "#f9c74f"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: month
+                        align: start
+                    - entity: sensor.hems_grid_to_powerwall_energy
+                      name: Grid
+                      color: "#ef5350"
+                      type: column
+                      float_precision: 3
+                      statistics:
+                        type: change
+                        period: month
+                        align: start
+
+          - type: conditional
+            grid_options:
+              columns: full
+            conditions:
+              - entity: input_select.hems_energy_source_view
+                state: Powerwall
+              - entity: input_select.hems_energy_timescale
+                state: Lifetime
+            card:
+              type: vertical-stack
+              cards:
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  chart_type: donut
+                  header:
+                    show: true
+                    title: Powerwall — Used By — Since Attribution Started
+                    show_states: false
+                  apex_config:
+                    chart:
+                      height: 330px
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const value = Number(opts.w.globals.series[opts.seriesIndex]) || 0;
+                          return seriesName + " · " + value.toFixed(1) + " kWh";
+                        }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                    dataLabels:
+                      formatter: |
+                        EVAL:function(value) {
+                          return Number(value).toFixed(0) + "%";
+                        }
+                    plotOptions:
+                      pie:
+                        donut:
+                          labels:
+                            show: true
+                            total:
+                              show: true
+                              label: Total
+                              formatter: |
+                                EVAL:function(w) {
+                                  const total = w.globals.seriesTotals.reduce((a, b) => a + b, 0);
+                                  return total.toFixed(1) + " kWh";
+                                }
+                  series:
+                    - entity: sensor.hems_powerwall_to_home_energy
+                      name: Home
+                      color: "#5c6bc0"
+                      float_precision: 3
+                    - entity: sensor.hems_powerwall_to_ev_energy
+                      name: BYD Atto 3
+                      color: "#42a5f5"
+                      float_precision: 3
+                    - entity: sensor.hems_powerwall_to_grid_energy
+                      name: Grid export
+                      color: "#ef5350"
+                      float_precision: 3
+                - type: custom:apexcharts-card
+                  update_interval: 5min
+                  chart_type: donut
+                  header:
+                    show: true
+                    title: Powerwall — Charged From — Since Attribution Started
+                    show_states: false
+                  apex_config:
+                    chart:
+                      height: 330px
+                    legend:
+                      show: true
+                      position: bottom
+                      formatter: |
+                        EVAL:function(seriesName, opts) {
+                          const value = Number(opts.w.globals.series[opts.seriesIndex]) || 0;
+                          return seriesName + " · " + value.toFixed(1) + " kWh";
+                        }
+                    tooltip:
+                      y:
+                        formatter: |
+                          EVAL:function(value) {
+                            return Number(value).toFixed(2) + " kWh";
+                          }
+                    dataLabels:
+                      formatter: |
+                        EVAL:function(value) {
+                          return Number(value).toFixed(0) + "%";
+                        }
+                    plotOptions:
+                      pie:
+                        donut:
+                          labels:
+                            show: true
+                            total:
+                              show: true
+                              label: Total
+                              formatter: |
+                                EVAL:function(w) {
+                                  const total = w.globals.seriesTotals.reduce((a, b) => a + b, 0);
+                                  return total.toFixed(1) + " kWh";
+                                }
+                  series:
+                    - entity: sensor.hems_solar_to_powerwall_energy
+                      name: Solar
+                      color: "#f9c74f"
+                      float_precision: 3
+                    - entity: sensor.hems_grid_to_powerwall_energy
+                      name: Grid
+                      color: "#ef5350"
+                      float_precision: 3

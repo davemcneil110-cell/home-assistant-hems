@@ -1,0 +1,64 @@
+{% set availability = states('sensor.ev_charging_availability') %}
+{% set soc_raw = states('sensor.hems_effective_ev_soc') %}
+{% set target_raw = states('sensor.hems_ev_target_today') %}
+{% set genuine_solar = states('sensor.hems_genuine_excess_solar') %}
+{% set grid_window = states('sensor.hems_ev_grid_charge_window') %}
+{% set current_price_raw = states('sensor.hems_effective_import_price') %}
+{% set effective_limit_raw = states(
+  'sensor.hems_effective_grid_charge_price_limit'
+) %}
+{% set urgent_active = is_state('input_boolean.hems_ev_urgent_charge_active', 'on') %}
+{% set recovery_approved = is_state('input_boolean.hems_ev_recovery_approved', 'on') %}
+
+{% if availability == 'TEST_CONFLICT' %}
+  TEST_CONFLICT
+{% elif not is_number(soc_raw)
+      or not is_number(target_raw) %}
+  INPUT_UNAVAILABLE
+{% else %}
+  {% set soc = soc_raw | float %}
+  {% set target = target_raw | float %}
+  {% set solar_available = genuine_solar == 'AVAILABLE' %}
+  {% set price_inputs_valid = is_number(current_price_raw)
+      and is_number(effective_limit_raw) %}
+  {% set current_grid_cheap = price_inputs_valid
+      and (current_price_raw | float) <= (effective_limit_raw | float) %}
+  {# Before the deadline retain the Amber forecast scheduler. After the
+     deadline, permit target catch-up only while the live price is still within
+     the effective normal/cloudy-day limit. This prevents a 14:30 deadline from
+     blocking a genuinely cheap catch-up interval, but forces Stop as soon as
+     the price rises above the configured allowance. #}
+  {% set grid_charge_now = current_grid_cheap and (
+      grid_window in [
+        'CHARGE_NOW_CHEAPEST_VISIBLE',
+        'CHARGE_NOW_REQUIRED_CHEAP_WINDOW'
+      ]
+      or grid_window == 'DEADLINE_PASSED'
+    ) %}
+
+  {% if soc >= target %}
+    EV_TARGET_MET
+  {% elif availability not in ['READY', 'CHARGING'] %}
+    EV_UNAVAILABLE
+  {% elif urgent_active and soc < 50 %}
+    EV_URGENT_CONTINUE_TO_50
+  {% elif soc <= 30 %}
+    EV_URGENT_START_TO_50
+  {% elif recovery_approved and soc < target %}
+    EV_APPROVED_CHARGE_NOW
+  {% elif grid_window in ['INPUT_UNAVAILABLE', 'TEST_CONFLICT'] %}
+    INPUT_UNAVAILABLE
+  {% elif soc < 50 and grid_charge_now %}
+    ALLOW_CHEAP_GRID
+  {% elif soc < 50 and solar_available %}
+    ALLOW_EXCESS_SOLAR
+  {% elif soc < 50 %}
+    EV_RECOVERY_APPROVAL_REQUIRED
+  {% elif grid_charge_now %}
+    ALLOW_CHEAP_GRID
+  {% elif solar_available %}
+    ALLOW_EXCESS_SOLAR
+  {% else %}
+    BLOCK_WAIT_FOR_EXCESS_SOLAR_OR_CHEAP_GRID
+  {% endif %}
+{% endif %}

@@ -1,0 +1,51 @@
+alias: HEMS - EV Charge Commitment Reset
+description: >-
+  Clears an approved EV charge-now commitment after its active target is
+  confirmed for one minute. At 00:05 it also starts a clean daily plan and
+  resets Long Drive Today. This automation only updates HEMS planning helpers
+  and never controls hardware.
+triggers:
+  - trigger: template
+    value_template: >-
+      {% set soc = states('sensor.hems_effective_ev_soc') %}
+      {% set target = states('sensor.hems_ev_target_today') %}
+      {{
+        is_state('input_boolean.hems_ev_recovery_approved', 'on')
+        and is_number(soc)
+        and is_number(target)
+        and (soc | float) >= (target | float)
+      }}
+    for: "00:01:00"
+    id: target_met
+  - trigger: time
+    at: "00:05:00"
+    id: daily_reset
+conditions: []
+actions:
+  - action: input_boolean.turn_off
+    target:
+      entity_id:
+        - input_boolean.hems_ev_recovery_approved
+        - input_boolean.ev_expected_back_today
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'daily_reset' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.hems_ev_long_drive_today
+  - action: notify.mobile_app_primary_phone
+    continue_on_error: true
+    data:
+      message: clear_notification
+      data:
+        tag: hems_ev_30_50_choice
+  - action: notify.mobile_app_secondary_ev_phone
+    continue_on_error: true
+    data:
+      message: clear_notification
+      data:
+        tag: hems_ev_30_50_choice
+mode: single
+max_exceeded: silent

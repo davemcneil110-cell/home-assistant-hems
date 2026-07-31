@@ -1,0 +1,830 @@
+# HEMS Energy Flow Dashboard
+#
+# Purpose:
+# - A view-only, Tesla-app-inspired dashboard for everyday use.
+# - Leaves the existing HEMS commissioning dashboard unchanged.
+# - Uses verified HEMS effective sensors for live decisions and power flow.
+# - Includes a Savings view when the HEMS System Savings package is installed.
+#
+# Required HACS dashboard cards:
+# - Power Flow Card Plus: https://github.com/flixlix/power-flow-card-plus
+# - ApexCharts Card: https://github.com/RomRider/apexcharts-card
+#
+# Already used by this Home Assistant installation:
+# - card-mod
+#
+# Verified sign conventions:
+# - Grid positive = importing; grid negative = exporting.
+# - Battery positive = discharging; battery negative = charging.
+# The installed Power Flow Card Plus version uses this battery convention
+# directly. Do not invert the battery state: positive must animate from the
+# Powerwall to the home, while negative must animate into the Powerwall.
+
+title: HEMS Energy Flow
+
+views:
+  - title: Energy Flow
+    path: energy-flow
+    icon: mdi:home-lightning-bolt
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: Home Energy
+            icon: mdi:home-lightning-bolt
+            heading_style: title
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              {% set mission = states('sensor.hems_current_mission') %}
+              {% set reason = states('sensor.hems_mission_reason') %}
+              {% set next = states('sensor.hems_next_action') %}
+              {% set pw = states('sensor.hems_effective_powerwall') %}
+              {% set ev = states('sensor.hems_effective_ev_soc') %}
+              {% set price = states('sensor.hems_effective_import_price') %}
+              # {{ mission }}
+
+              {{ reason }}
+
+              **Next:** {{ next }}
+
+              **Powerwall {{ pw }}%** · **BYD {{ ev }}%** · **Grid ${{ price }}/kWh**
+            card_mod:
+              style: |
+                ha-card {
+                  background: linear-gradient(135deg, rgba(20,27,38,0.98), rgba(38,51,67,0.96));
+                  border: 1px solid rgba(92,187,246,0.25);
+                  border-radius: 24px;
+                  box-shadow: 0 12px 34px rgba(0,0,0,0.24);
+                  color: #f5f7fa;
+                  padding: 8px 12px;
+                }
+                ha-markdown {
+                  line-height: 1.45;
+                }
+
+          - type: custom:power-flow-card-plus
+            grid_options:
+              columns: full
+            title: Live Energy Flow
+            dashboard_link: /energy
+            dashboard_link_label: Open Energy Dashboard
+            clickable_entities: true
+            display_zero_lines:
+              mode: transparency
+              transparency: 70
+            use_new_flow_rate_model: true
+            min_expected_power: 0.05
+            max_expected_power: 8.25
+            min_flow_rate: 0.8
+            max_flow_rate: 5
+            kilo_threshold: 0
+            kilo_decimals: 2
+            entities:
+              grid:
+                entity: sensor.hems_effective_grid_power
+                name: Grid
+                icon: mdi:transmission-tower
+                display_state: one_way
+                display_zero_tolerance: 0.05
+                color_circle: color_dynamically
+                color_icon: color_dynamically
+                color:
+                  consumption: "#ef5350"
+                  production: "#42a5f5"
+                secondary_info:
+                  entity: sensor.hems_effective_import_price
+                  unit_of_measurement: $/kWh
+                  decimals: 2
+              solar:
+                entity: sensor.hems_effective_solar_power
+                name: Solar
+                icon: mdi:solar-power-variant
+                color: "#f9c74f"
+                color_icon: true
+                color_value: true
+                display_zero: true
+                secondary_info:
+                  entity: sensor.hems_effective_feed_in_price
+                  unit_of_measurement: $/kWh
+                  decimals: 2
+              battery:
+                entity: sensor.hems_effective_battery_power
+                state_of_charge: sensor.hems_effective_powerwall
+                name: Powerwall
+                icon: mdi:home-battery
+                display_state: one_way
+                color_circle: color_dynamically
+                color_icon: color_dynamically
+                color:
+                  consumption: "#26a69a"
+                  production: "#66bb6a"
+              home:
+                entity: sensor.house_home_energy_gateway_teslemetry_load_power
+                name: Home
+                icon: mdi:home
+                override_state: true
+                subtract_individual: true
+                color_icon: true
+              individual:
+                - entity: sensor.solaredge_ev_charger_ev_charger_power
+                  name: BYD Atto 3
+                  icon: mdi:car-electric
+                  color: "#42a5f5"
+                  color_icon: true
+                  color_value: true
+                  decimals: 2
+                  display_zero: true
+                  secondary_info:
+                    entity: sensor.hems_effective_ev_soc
+                    unit_of_measurement: "%"
+                    decimals: 0
+            card_mod:
+              style: |
+                ha-card {
+                  border-radius: 24px;
+                  box-shadow: 0 10px 30px rgba(0,0,0,0.16);
+                }
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Storage and Vehicle
+            icon: mdi:battery-charging-high
+
+          - type: gauge
+            entity: sensor.hems_effective_powerwall
+            name: Tesla Powerwall
+            needle: true
+            min: 0
+            max: 100
+            severity:
+              red: 0
+              yellow: 20
+              green: 80
+
+          - type: gauge
+            entity: sensor.hems_effective_ev_soc
+            name: BYD Atto 3
+            needle: true
+            min: 0
+            max: 100
+            severity:
+              red: 0
+              yellow: 30
+              green: 80
+
+          - type: tile
+            entity: sensor.powerwall_energy_required
+            name: Powerwall Remaining
+            icon: mdi:home-battery-outline
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.ev_energy_required
+            name: EV Remaining
+            icon: mdi:car-electric-outline
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_ev_target_today
+            name: EV Target Today
+            icon: mdi:target
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.ev_charging_availability
+            name: EV Availability
+            icon: mdi:ev-station
+            color: blue
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Amber and Charging Plan
+            icon: mdi:cash-clock
+
+          - type: tile
+            entity: sensor.hems_effective_import_price
+            name: Import Now
+            icon: mdi:transmission-tower-import
+            color: red
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_effective_feed_in_price
+            name: Feed-in Now
+            icon: mdi:transmission-tower-export
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_effective_grid_charge_price_limit
+            name: Active Grid-Charge Limit
+            icon: mdi:cash-check
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_cheapest_visible_import_price
+            name: Cheapest Visible Price
+            icon: mdi:cash-fast
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_cheap_grid_minutes_before_target
+            name: Cheap Minutes Before Target
+            icon: mdi:timer-sand
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: input_datetime.hems_charging_target_time
+            name: Charging Target Time
+            icon: mdi:clock-check-outline
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            update_interval: 5min
+            graph_span: 12h
+            header:
+              show: true
+              title: Amber Price — Last 12 Hours
+              show_states: true
+              colorize_states: true
+            apex_config:
+              chart:
+                height: 260px
+              legend:
+                show: true
+              yaxis:
+                decimalsInFloat: 2
+                labels:
+                  formatter: |
+                    EVAL:function(value) {
+                      return "$" + Number(value).toFixed(2);
+                    }
+            series:
+              - entity: sensor.hems_effective_import_price
+                name: Import
+                color: "#ef5350"
+                stroke_width: 2
+                curve: stepline
+                group_by:
+                  duration: 5min
+                  func: last
+              - entity: sensor.hems_effective_feed_in_price
+                name: Feed-in
+                color: "#42a5f5"
+                stroke_width: 2
+                curve: stepline
+                group_by:
+                  duration: 5min
+                  func: last
+
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: Solar Performance
+            icon: mdi:white-balance-sunny
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            update_interval: 5min
+            graph_span: 16h
+            span:
+              start: day
+              offset: +5h
+            header:
+              show: true
+              title: Solar Actual vs Solcast Forecast
+              standard_format: false
+              show_states: true
+            apex_config:
+              chart:
+                height: 330px
+              legend:
+                show: true
+              yaxis:
+                min: 0
+                decimalsInFloat: 1
+            series:
+              - entity: sensor.hems_effective_solar_power
+                name: Actual — 30 Minute Average
+                unit: kW
+                color: "#f9c74f"
+                curve: smooth
+                type: area
+                opacity: 0.35
+                stroke_width: 3
+                float_precision: 2
+                extend_to: false
+                group_by:
+                  duration: 30min
+                  func: avg
+                  fill: zero
+              - entity: sensor.solcast_pv_forecast_forecast_today
+                name: Solcast Forecast
+                unit: kW
+                color: "#78909c"
+                curve: smooth
+                stroke_width: 3
+                data_generator: |-
+                  const forecast = entity.attributes.detailedForecast;
+                  if (!Array.isArray(forecast)) return [];
+                  return forecast.map((entry) => {
+                    return [new Date(entry.period_start).getTime(), Number(entry.pv_estimate)];
+                  });
+
+          - type: tile
+            entity: sensor.house_solaredge_se8250h_inverter_solar_actual_today
+            name: Solar Produced Today
+            icon: mdi:solar-power
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.solcast_pv_forecast_forecast_today
+            name: Forecast Today
+            icon: mdi:weather-sunny
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.solcast_pv_forecast_forecast_remaining_today
+            name: Forecast Remaining
+            icon: mdi:weather-sunset-down
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.solcast_pv_forecast_forecast_tomorrow
+            name: Forecast Tomorrow
+            icon: mdi:calendar-sun
+            color: amber
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Today's Energy
+            icon: mdi:chart-donut
+
+          - type: entities
+            show_header_toggle: false
+            state_color: true
+            entities:
+              - entity: sensor.house_solaredge_se8250h_inverter_solar_actual_today
+                name: Solar Produced
+                icon: mdi:solar-power
+              - entity: sensor.house_home_energy_gateway_teslemetry_house_used_today
+                name: House Used
+                icon: mdi:home-lightning-bolt-outline
+              - entity: sensor.house_home_energy_gateway_teslemetry_grid_imported_today
+                name: Grid Imported
+                icon: mdi:transmission-tower-import
+              - entity: sensor.house_home_energy_gateway_teslemetry_grid_exported_today
+                name: Grid Exported
+                icon: mdi:transmission-tower-export
+              - entity: sensor.house_home_energy_gateway_teslemetry_powerwall_charged_today
+                name: Powerwall Charged
+                icon: mdi:battery-arrow-up
+              - entity: sensor.house_home_energy_gateway_teslemetry_powerwall_discharged_today
+                name: Powerwall Discharged
+                icon: mdi:battery-arrow-down
+              - entity: sensor.house_solaredge_ev_charger_ev_charged_today
+                name: EV Charged
+                icon: mdi:car-electric
+
+          - type: markdown
+            content: |-
+              {% set imported = states('input_number.hems_import_cost_today') | float(0) %}
+              {% set exported = states('input_number.hems_export_credit_today') | float(0) %}
+              {% set net = imported - exported %}
+              ## Today's Financial Position
+
+              **Import cost:** ${{ imported | round(2) }}<br>
+              **Export credit:** ${{ exported | round(2) }}<br>
+              {% if net < 0 %}
+              **Net:** 🟢 ${{ (net * -1) | round(2) }} credit
+              {% else %}
+              **Net:** 🔴 ${{ net | round(2) }} cost
+              {% endif %}
+            card_mod:
+              style: |
+                ha-card {
+                  border-radius: 20px;
+                  background: linear-gradient(145deg, rgba(25,35,48,0.96), rgba(31,42,55,0.92));
+                  color: #f5f7fa;
+                }
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Overnight Learning
+            icon: mdi:weather-night
+
+          - type: tile
+            entity: input_number.hems_overnight_usage
+            name: Last Overnight Usage
+            icon: mdi:home-clock-outline
+            color: indigo
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: input_number.hems_overnight_start_powerwall
+            name: Overnight Start SOC
+            icon: mdi:battery-clock-outline
+            color: indigo
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: input_number.hems_overnight_end_powerwall
+            name: Overnight End SOC
+            icon: mdi:battery-minus-outline
+            color: indigo
+            tap_action:
+              action: more-info
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            graph_span: 14d
+            span:
+              end: day
+            header:
+              show: true
+              title: Overnight Usage — Last 14 Days
+              show_states: true
+            apex_config:
+              chart:
+                height: 230px
+              dataLabels:
+                enabled: true
+              yaxis:
+                min: 0
+                decimalsInFloat: 1
+            series:
+              - entity: input_number.hems_overnight_usage
+                name: Overnight Usage
+                unit: kWh
+                type: column
+                color: "#7e57c2"
+                float_precision: 1
+                group_by:
+                  duration: 1d
+                  func: last
+
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: HEMS Health
+            icon: mdi:shield-check
+
+          - type: tile
+            entity: sensor.energy_brain_guardian
+            name: Powerwall Guardian
+            icon: mdi:home-battery
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_ev_guardian
+            name: EV Guardian
+            icon: mdi:car-electric
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_solar_guardian
+            name: Solar Guardian
+            icon: mdi:solar-power-variant
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_charging_deadline_feasibility
+            name: Charging Deadline
+            icon: mdi:calendar-clock
+            color: red
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_ev_worker_command_guard
+            name: EV Command Guard
+            icon: mdi:shield-car
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_genuine_excess_solar
+            name: Genuine Excess Solar
+            icon: mdi:solar-power
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_solar_export_limit
+            name: Solar Export Limit
+            icon: mdi:transmission-tower-export
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_coordinated_powerwall_mode
+            name: Coordinated Powerwall Mode
+            icon: mdi:battery-sync
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              ### Current HEMS Plan
+
+              | System | Decision |
+              |:--|:--|
+              | Powerwall | `{{ states('sensor.hems_coordinated_powerwall_mode') }}` at {{ states('sensor.hems_coordinated_powerwall_reserve') }}% reserve |
+              | EV | `{{ states('sensor.hems_ev_charge_permission') }}` |
+              | EV grid window | `{{ states('sensor.hems_ev_grid_charge_window') }}` |
+              | Solar | {{ states('sensor.hems_solar_export_limit') }} W export limit |
+              | Deadline | `{{ states('sensor.hems_charging_deadline_feasibility') }}` |
+              | Grid energy required | {{ states('sensor.grid_energy_required') }} kWh |
+              | House remaining | {{ states('sensor.house_energy_remaining_today') }} kWh |
+
+              This dashboard is intentionally view-only. Use **HEMS Commissioning Control** for manual controls, test switches and commissioning.
+
+  - title: Savings
+    path: savings
+    icon: mdi:cash-multiple
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: Energy System Savings
+            icon: mdi:cash-multiple
+            heading_style: title
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              {% set total = states('sensor.hems_combined_lifetime_estimated_savings') | float(0) %}
+              {% set solar = states('sensor.hems_solar_lifetime_estimated_savings') | float(0) %}
+              {% set battery = states('sensor.hems_powerwall_lifetime_estimated_savings') | float(0) %}
+              {% set rate = states('sensor.hems_combined_live_net_savings_rate') | float(0) %}
+              # ${{ '{:,.2f}'.format(total) }}
+
+              **Estimated lifetime energy benefit since July 2023**
+
+              Solar **${{ '{:,.2f}'.format(solar) }}** · Powerwall **${{ '{:,.2f}'.format(battery) }}**
+
+              {% if rate > 0 %}
+              Saving now at approximately **${{ rate | round(2) }}/hour**.
+              {% elif rate < 0 %}
+              Current net energy cost rate: **${{ (0 - rate) | round(2) }}/hour**.
+              {% else %}
+              No measurable live saving or cost is being attributed right now.
+              {% endif %}
+            card_mod:
+              style: |
+                ha-card {
+                  background: linear-gradient(135deg, rgba(14,45,36,0.98), rgba(27,76,61,0.96));
+                  border: 1px solid rgba(102,187,106,0.35);
+                  border-radius: 24px;
+                  box-shadow: 0 12px 34px rgba(0,0,0,0.24);
+                  color: #f5f7fa;
+                  padding: 10px 14px;
+                }
+
+          - type: entities
+            grid_options:
+              columns: full
+            title: Choose Savings Period
+            show_header_toggle: false
+            entities:
+              - entity: input_select.hems_savings_timescale
+                name: Timescale
+
+          - type: tile
+            entity: sensor.hems_total_savings_selected_period
+            name: Total Benefit
+            icon: mdi:cash-multiple
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_solar_savings_selected_period
+            name: Solar Benefit
+            icon: mdi:solar-power
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_savings_selected_period
+            name: Powerwall Benefit
+            icon: mdi:home-battery
+            color: green
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Saving Right Now
+            icon: mdi:cash-clock
+
+          - type: tile
+            entity: sensor.hems_combined_live_net_savings_rate
+            name: Combined Net Rate
+            icon: mdi:cash-fast
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_solar_live_net_savings_rate
+            name: Solar Net Rate
+            icon: mdi:solar-power-variant
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_live_net_savings_rate
+            name: Powerwall Net Rate
+            icon: mdi:home-battery
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_grid_charge_cost_rate
+            name: Powerwall Grid-Charge Cost
+            icon: mdi:battery-minus
+            color: red
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Live Valuation
+            icon: mdi:transmission-tower
+
+          - type: tile
+            entity: sensor.hems_savings_live_import_price
+            name: Amber Import Price
+            icon: mdi:transmission-tower-import
+            color: red
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_savings_live_feed_in_price
+            name: Amber Feed-in Price
+            icon: mdi:transmission-tower-export
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_solar_avoided_import_savings_rate
+            name: Solar Avoided Import Rate
+            icon: mdi:home-lightning-bolt
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_avoided_import_savings_rate
+            name: Powerwall Avoided Import Rate
+            icon: mdi:battery-arrow-down
+            color: green
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: Savings History
+            icon: mdi:chart-areaspline
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            update_interval: 5min
+            graph_span: 30d
+            span:
+              end: day
+            header:
+              show: true
+              title: Daily Asset-Attributed Benefit — Last 30 Days
+              show_states: false
+            stacked: true
+            apex_config:
+              chart:
+                height: 320px
+              legend:
+                show: true
+                position: bottom
+              yaxis:
+                min: 0
+                labels:
+                  formatter: |
+                    EVAL:function(value) {
+                      return "$" + Number(value).toFixed(2);
+                    }
+              tooltip:
+                y:
+                  formatter: |
+                    EVAL:function(value) {
+                      return "$" + Number(value).toFixed(2);
+                    }
+            series:
+              - entity: sensor.hems_solar_savings_since_tracking
+                name: Solar
+                color: "#f9c74f"
+                type: column
+                float_precision: 2
+                statistics:
+                  type: change
+                  period: day
+                  align: start
+              - entity: sensor.hems_powerwall_savings_since_tracking
+                name: Powerwall
+                color: "#66bb6a"
+                type: column
+                float_precision: 2
+                statistics:
+                  type: change
+                  period: day
+                  align: start
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              ### Opening estimate
+
+              | Asset | Historical energy | Conservative value | Opening benefit |
+              |:--|--:|--:|--:|
+              | Solar | {{ states('input_number.hems_solar_historical_lifetime_energy') }} kWh | ${{ states('input_number.hems_solar_historical_average_value') }}/kWh | **${{ states('sensor.hems_solar_historical_savings_baseline') }}** |
+              | Powerwall | {{ states('input_number.hems_powerwall_historical_discharge_energy') }} kWh discharged | ${{ states('input_number.hems_powerwall_historical_average_value') }}/kWh | **${{ states('sensor.hems_powerwall_historical_savings_baseline') }}** |
+
+              Live tracking began when the savings package was installed. Grid supplied directly to the house or EV is not counted as a saving. Negative feed-in and Powerwall grid-charging costs reduce the relevant live result.
+
+              The combined figure is an **asset-attributed benefit**. Solar captured into the Powerwall is credited to Solar, while avoided import when that energy is later discharged is credited to the Powerwall.

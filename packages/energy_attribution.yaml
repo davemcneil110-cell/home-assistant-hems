@@ -1,0 +1,414 @@
+# HEMS Energy Attribution Package
+#
+# Install as:
+#   /config/packages/hems_energy_attribution.yaml
+#
+# This package estimates source-to-destination energy on the home's shared AC
+# bus. It uses proportional allocation when more than one source or destination
+# is active. Any short-term mismatch between source and destination sensors is
+# excluded rather than assigned to an invented route.
+#
+# Verified sign conventions:
+# - sensor.hems_effective_grid_power: positive import, negative export (kW)
+# - sensor.hems_effective_battery_power: positive discharge, negative charge (kW)
+# - sensor.hems_effective_solar_power: positive generation (kW)
+# - sensor.house_home_energy_gateway_teslemetry_load_power includes EV load (kW)
+
+input_select:
+  hems_energy_source_view:
+    name: HEMS Energy Source View
+    icon: mdi:transmission-tower
+    options:
+      - Solar
+      - Grid
+      - Powerwall
+    initial: Powerwall
+
+  hems_energy_timescale:
+    name: HEMS Energy Timescale
+    icon: mdi:calendar-range
+    options:
+      - Today
+      - This Week
+      - This Month
+      - This Year
+      - Lifetime
+    initial: Today
+
+template:
+  - sensor:
+      # Source-side power -----------------------------------------------------
+      - name: HEMS Energy Source Solar Power
+        unique_id: hems_energy_source_solar_power
+        icon: mdi:solar-power-variant
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_solar_power') }}
+        state: >-
+          {{ [states('sensor.hems_effective_solar_power') | float(0), 0] | max | round(4) }}
+
+      - name: HEMS Energy Source Grid Power
+        unique_id: hems_energy_source_grid_power
+        icon: mdi:transmission-tower-import
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_grid_power') }}
+        state: >-
+          {{ [states('sensor.hems_effective_grid_power') | float(0), 0] | max | round(4) }}
+
+      - name: HEMS Energy Source Powerwall Power
+        unique_id: hems_energy_source_powerwall_power
+        icon: mdi:home-battery
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_battery_power') }}
+        state: >-
+          {{ [states('sensor.hems_effective_battery_power') | float(0), 0] | max | round(4) }}
+
+      # Destination-side power ----------------------------------------------
+      - name: HEMS Energy Destination Home Power
+        unique_id: hems_energy_destination_home_power
+        icon: mdi:home-lightning-bolt
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.house_home_energy_gateway_teslemetry_load_power')
+             and has_value('sensor.solaredge_ev_charger_ev_charger_power') }}
+        state: >-
+          {% set load = [states('sensor.house_home_energy_gateway_teslemetry_load_power') | float(0), 0] | max %}
+          {% set ev = [states('sensor.solaredge_ev_charger_ev_charger_power') | float(0), 0] | max %}
+          {{ [load - [ev, load] | min, 0] | max | round(4) }}
+
+      - name: HEMS Energy Destination EV Power
+        unique_id: hems_energy_destination_ev_power
+        icon: mdi:car-electric
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.house_home_energy_gateway_teslemetry_load_power')
+             and has_value('sensor.solaredge_ev_charger_ev_charger_power') }}
+        state: >-
+          {% set load = [states('sensor.house_home_energy_gateway_teslemetry_load_power') | float(0), 0] | max %}
+          {% set ev = [states('sensor.solaredge_ev_charger_ev_charger_power') | float(0), 0] | max %}
+          {{ [ev, load] | min | round(4) }}
+
+      - name: HEMS Energy Destination Powerwall Power
+        unique_id: hems_energy_destination_powerwall_power
+        icon: mdi:battery-arrow-down
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_battery_power') }}
+        state: >-
+          {{ [0 - states('sensor.hems_effective_battery_power') | float(0), 0] | max | round(4) }}
+
+      - name: HEMS Energy Destination Grid Power
+        unique_id: hems_energy_destination_grid_power
+        icon: mdi:transmission-tower-export
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_grid_power') }}
+        state: >-
+          {{ [0 - states('sensor.hems_effective_grid_power') | float(0), 0] | max | round(4) }}
+
+      # Attribution quality --------------------------------------------------
+      - name: HEMS Energy Attribution Match
+        unique_id: hems_energy_attribution_match
+        icon: mdi:scale-balance
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_solar_power')
+             and has_value('sensor.hems_energy_source_grid_power')
+             and has_value('sensor.hems_energy_source_powerwall_power')
+             and has_value('sensor.hems_energy_destination_home_power')
+             and has_value('sensor.hems_energy_destination_ev_power')
+             and has_value('sensor.hems_energy_destination_powerwall_power')
+             and has_value('sensor.hems_energy_destination_grid_power') }}
+        state: >-
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0)
+                         + states('sensor.hems_energy_source_grid_power') | float(0)
+                         + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0)
+                              + states('sensor.hems_energy_destination_ev_power') | float(0)
+                              + states('sensor.hems_energy_destination_powerwall_power') | float(0)
+                              + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {% set largest = [sources, destinations] | max %}
+          {{ (100 * ([sources, destinations] | min) / largest) | round(1) if largest > 0.05 else 100 }}
+
+      # Solar routes ---------------------------------------------------------
+      - name: HEMS Solar To Home Power
+        unique_id: hems_solar_to_home_power
+        icon: mdi:solar-power-variant-outline
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_solar_power')
+             and has_value('sensor.hems_energy_destination_home_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_solar_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_home_power') | float(0) %}
+          {% set sources = source + states('sensor.hems_energy_source_grid_power') | float(0) + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = destination + states('sensor.hems_energy_destination_ev_power') | float(0) + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Solar To EV Power
+        unique_id: hems_solar_to_ev_power
+        icon: mdi:solar-power-variant-outline
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_solar_power')
+             and has_value('sensor.hems_energy_destination_ev_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_solar_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_ev_power') | float(0) %}
+          {% set sources = source + states('sensor.hems_energy_source_grid_power') | float(0) + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + destination + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Solar To Powerwall Power
+        unique_id: hems_solar_to_powerwall_power
+        icon: mdi:solar-power-variant-outline
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_solar_power')
+             and has_value('sensor.hems_energy_destination_powerwall_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_solar_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_powerwall_power') | float(0) %}
+          {% set sources = source + states('sensor.hems_energy_source_grid_power') | float(0) + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + states('sensor.hems_energy_destination_ev_power') | float(0) + destination + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Solar To Grid Power
+        unique_id: hems_solar_to_grid_power
+        icon: mdi:solar-power-variant-outline
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_solar_power')
+             and has_value('sensor.hems_energy_destination_grid_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_solar_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {% set sources = source + states('sensor.hems_energy_source_grid_power') | float(0) + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + states('sensor.hems_energy_destination_ev_power') | float(0) + states('sensor.hems_energy_destination_powerwall_power') | float(0) + destination %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      # Grid routes ----------------------------------------------------------
+      - name: HEMS Grid To Home Power
+        unique_id: hems_grid_to_home_power
+        icon: mdi:transmission-tower-import
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_grid_power')
+             and has_value('sensor.hems_energy_destination_home_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_grid_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_home_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + source + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = destination + states('sensor.hems_energy_destination_ev_power') | float(0) + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Grid To EV Power
+        unique_id: hems_grid_to_ev_power
+        icon: mdi:transmission-tower-import
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_grid_power')
+             and has_value('sensor.hems_energy_destination_ev_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_grid_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_ev_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + source + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + destination + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Grid To Powerwall Power
+        unique_id: hems_grid_to_powerwall_power
+        icon: mdi:transmission-tower-import
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_grid_power')
+             and has_value('sensor.hems_energy_destination_powerwall_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_grid_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_powerwall_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + source + states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + states('sensor.hems_energy_destination_ev_power') | float(0) + destination + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      # Powerwall routes -----------------------------------------------------
+      - name: HEMS Powerwall To Home Power
+        unique_id: hems_powerwall_to_home_power
+        icon: mdi:battery-arrow-up
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_powerwall_power')
+             and has_value('sensor.hems_energy_destination_home_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_home_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + states('sensor.hems_energy_source_grid_power') | float(0) + source %}
+          {% set destinations = destination + states('sensor.hems_energy_destination_ev_power') | float(0) + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Powerwall To EV Power
+        unique_id: hems_powerwall_to_ev_power
+        icon: mdi:battery-arrow-up
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_powerwall_power')
+             and has_value('sensor.hems_energy_destination_ev_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_ev_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + states('sensor.hems_energy_source_grid_power') | float(0) + source %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + destination + states('sensor.hems_energy_destination_powerwall_power') | float(0) + states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+      - name: HEMS Powerwall To Grid Power
+        unique_id: hems_powerwall_to_grid_power
+        icon: mdi:battery-arrow-up
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_energy_source_powerwall_power')
+             and has_value('sensor.hems_energy_destination_grid_power') }}
+        state: >-
+          {% set source = states('sensor.hems_energy_source_powerwall_power') | float(0) %}
+          {% set destination = states('sensor.hems_energy_destination_grid_power') | float(0) %}
+          {% set sources = states('sensor.hems_energy_source_solar_power') | float(0) + states('sensor.hems_energy_source_grid_power') | float(0) + source %}
+          {% set destinations = states('sensor.hems_energy_destination_home_power') | float(0) + states('sensor.hems_energy_destination_ev_power') | float(0) + states('sensor.hems_energy_destination_powerwall_power') | float(0) + destination %}
+          {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
+
+sensor:
+  # The left Riemann method is appropriate for step-like power measurements.
+  # max_sub_interval ensures energy continues accumulating while power is stable.
+  - platform: integration
+    source: sensor.hems_solar_to_home_power
+    name: HEMS Solar To Home Energy
+    unique_id: hems_solar_to_home_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_solar_to_ev_power
+    name: HEMS Solar To EV Energy
+    unique_id: hems_solar_to_ev_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_solar_to_powerwall_power
+    name: HEMS Solar To Powerwall Energy
+    unique_id: hems_solar_to_powerwall_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_solar_to_grid_power
+    name: HEMS Solar To Grid Energy
+    unique_id: hems_solar_to_grid_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_grid_to_home_power
+    name: HEMS Grid To Home Energy
+    unique_id: hems_grid_to_home_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_grid_to_ev_power
+    name: HEMS Grid To EV Energy
+    unique_id: hems_grid_to_ev_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_grid_to_powerwall_power
+    name: HEMS Grid To Powerwall Energy
+    unique_id: hems_grid_to_powerwall_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_powerwall_to_home_power
+    name: HEMS Powerwall To Home Energy
+    unique_id: hems_powerwall_to_home_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_powerwall_to_ev_power
+    name: HEMS Powerwall To EV Energy
+    unique_id: hems_powerwall_to_ev_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_powerwall_to_grid_power
+    name: HEMS Powerwall To Grid Energy
+    unique_id: hems_powerwall_to_grid_energy
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5

@@ -1,0 +1,307 @@
+alias: HEMS - Charging Deadline Warning
+description: >-
+  Sends one warning when the read-only charging feasibility sensor enters a
+  target-risk or incomplete EV-return-plan state. primary user receives every warning;
+  secondary EV user receives it only when an active EV shortfall or EV return decision is
+  involved.
+  Notifications are restricted to 06:30-21:30 local time. An overnight risk is
+  rechecked at 06:30 and is sent only if it still exists. Warnings share a
+  15-minute cooldown and use one stable, alert-once mobile notification. This
+  automation does not control any hardware.
+
+triggers:
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_NOT_ENOUGH_PHYSICAL_TIME
+    for: "00:02:00"
+    id: physical_time
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_NOT_ENOUGH_CHEAP_TIME
+    for: "00:02:00"
+    id: cheap_time
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_DEADLINE_PASSED_WITH_SHORTFALL
+    for: "00:02:00"
+    id: deadline_passed
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: EV_RETURN_TIME_REQUIRED
+    for: "00:02:00"
+    id: return_time_required
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: EV_RETURN_DATE_MISMATCH
+    for: "00:02:00"
+    id: return_date_mismatch
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_EV_RETURN_OVERDUE
+    for: "00:02:00"
+    id: return_overdue
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_EV_RETURN_AFTER_DEADLINE
+    for: "00:02:00"
+    id: return_after_deadline
+
+  - trigger: state
+    entity_id: sensor.hems_charging_deadline_feasibility
+    to: WARNING_EV_RETURN_WINDOW_TOO_SHORT
+    for: "00:02:00"
+    id: return_window_short
+
+  - trigger: time
+    at: "06:30:00"
+    id: morning_recheck
+
+conditions:
+  - condition: time
+    after: "06:29:59"
+    before: "21:30:00"
+
+  - condition: template
+    value_template: >-
+      {{
+        this.attributes.last_triggered is none
+        or (
+          as_timestamp(now())
+          - as_timestamp(this.attributes.last_triggered)
+        ) >= 900
+      }}
+
+actions:
+  - variables:
+      warning_state: >-
+        {% if trigger is defined and trigger.id == 'physical_time' %}
+          WARNING_NOT_ENOUGH_PHYSICAL_TIME
+        {% elif trigger is defined and trigger.id == 'cheap_time' %}
+          WARNING_NOT_ENOUGH_CHEAP_TIME
+        {% elif trigger is defined and trigger.id == 'deadline_passed' %}
+          WARNING_DEADLINE_PASSED_WITH_SHORTFALL
+        {% elif trigger is defined and trigger.id == 'return_time_required' %}
+          EV_RETURN_TIME_REQUIRED
+        {% elif trigger is defined and trigger.id == 'return_date_mismatch' %}
+          EV_RETURN_DATE_MISMATCH
+        {% elif trigger is defined and trigger.id == 'return_overdue' %}
+          WARNING_EV_RETURN_OVERDUE
+        {% elif trigger is defined and trigger.id == 'return_after_deadline' %}
+          WARNING_EV_RETURN_AFTER_DEADLINE
+        {% elif trigger is defined and trigger.id == 'return_window_short' %}
+          WARNING_EV_RETURN_WINDOW_TOO_SHORT
+        {% else %}
+          {{ states('sensor.hems_charging_deadline_feasibility') }}
+        {% endif %}
+
+  - condition: template
+    value_template: >-
+      {{
+        warning_state in [
+          'WARNING_NOT_ENOUGH_PHYSICAL_TIME',
+          'WARNING_NOT_ENOUGH_CHEAP_TIME',
+          'WARNING_DEADLINE_PASSED_WITH_SHORTFALL',
+          'EV_RETURN_TIME_REQUIRED',
+          'EV_RETURN_DATE_MISMATCH',
+          'WARNING_EV_RETURN_OVERDUE',
+          'WARNING_EV_RETURN_AFTER_DEADLINE',
+          'WARNING_EV_RETURN_WINDOW_TOO_SHORT'
+        ]
+      }}
+
+  - delay: "00:00:15"
+
+  - condition: template
+    value_template: >-
+      {{
+        states('sensor.hems_charging_deadline_feasibility')
+        == warning_state
+      }}
+
+  - condition: template
+    value_template: >-
+      {{
+        warning_state != 'WARNING_NOT_ENOUGH_CHEAP_TIME'
+        or is_number(states(
+          'sensor.hems_cheapest_visible_import_price'
+        ))
+      }}
+
+  - variables:
+      cheapest_price_display: >-
+        {% set value = states(
+          'sensor.hems_cheapest_visible_import_price'
+        ) %}
+        {% if is_number(value) %}
+          ${{ value | float | round(3) }}/kWh
+        {% else %}
+          not currently available
+        {% endif %}
+
+      return_time_display: >-
+        {% set value = state_attr(
+          'input_datetime.hems_ev_expected_return_time',
+          'timestamp'
+        ) %}
+        {% if is_number(value) %}
+          {{ value | float | timestamp_custom(
+            '%a %d %b at %I:%M %p',
+            true
+          ) }}
+        {% else %}
+          not set
+        {% endif %}
+
+      ev_plan_display: >-
+        {% set availability = states(
+          'sensor.ev_charging_availability'
+        ) %}
+        {% set soc = states('sensor.hems_effective_ev_soc') %}
+        {% set target = states('sensor.hems_ev_target_today') %}
+        {% set projected = states(
+          'sensor.hems_ev_conservative_projected_soc_at_target'
+        ) %}
+        {% if availability in ['READY', 'CHARGING'] %}
+          EV: {{ soc }}% (target {{ target }}%, availability
+          {{ availability }}, projected {{ projected }}%).
+        {% elif is_state(
+          'input_boolean.ev_expected_back_today',
+          'on'
+        ) %}
+          EV: {{ soc }}% (target {{ target }}%, currently
+          {{ availability }}, expected return {{ return_time_display }}).
+        {% elif availability == 'AWAY' %}
+          EV: {{ soc }}% (currently away and excluded from today's remaining
+          charging plan).
+        {% else %}
+          EV: {{ soc }}% (availability {{ availability }} and excluded from
+          the active charging calculation).
+        {% endif %}
+
+      warning_reason: >-
+        {% if warning_state == 'WARNING_NOT_ENOUGH_PHYSICAL_TIME' %}
+          There is not enough physical charging time remaining to reach all
+          active targets by the configured deadline.
+        {% elif warning_state == 'WARNING_NOT_ENOUGH_CHEAP_TIME' %}
+          Amber's visible forecast reaches the deadline but does not contain
+          enough time below the configured maximum grid-charge price.
+        {% elif warning_state == 'EV_RETURN_TIME_REQUIRED' %}
+          The EV is expected back today with a charging shortfall, but its
+          expected return date and time is not available.
+        {% elif warning_state == 'EV_RETURN_DATE_MISMATCH' %}
+          The EV is marked as expected back today, but its configured return
+          date is not today.
+        {% elif warning_state == 'WARNING_EV_RETURN_OVERDUE' %}
+          The EV has not become available even though its expected return time
+          has passed.
+        {% elif warning_state == 'WARNING_EV_RETURN_AFTER_DEADLINE' %}
+          The EV's expected return time is at or after today's charging
+          deadline.
+        {% elif warning_state == 'WARNING_EV_RETURN_WINDOW_TOO_SHORT' %}
+          The EV is expected back before the deadline, but the remaining
+          physical charging window is too short for the active targets.
+        {% else %}
+          The configured charging deadline has passed while at least one active
+          target still has an energy shortfall.
+        {% endif %}
+
+      suggested_action: >-
+        {% if warning_state == 'WARNING_NOT_ENOUGH_PHYSICAL_TIME' %}
+          Review simultaneous charging, today's targets, or the charging
+          deadline.
+        {% elif warning_state == 'WARNING_NOT_ENOUGH_CHEAP_TIME' %}
+          Decide whether to approve higher-priced grid support or accept a lower
+          finishing target.
+        {% elif warning_state == 'EV_RETURN_TIME_REQUIRED' %}
+          Set HEMS EV Expected Return Time, or turn off EV Expected Back Today.
+        {% elif warning_state == 'EV_RETURN_DATE_MISMATCH' %}
+          Correct the expected return date, or turn off EV Expected Back Today.
+        {% elif warning_state == 'WARNING_EV_RETURN_OVERDUE' %}
+          Update the expected return time, or remove the EV from today's plan.
+        {% elif warning_state == 'WARNING_EV_RETURN_AFTER_DEADLINE' %}
+          Move the return/deadline time, reduce the EV target, or remove the EV
+          from today's plan.
+        {% elif warning_state == 'WARNING_EV_RETURN_WINDOW_TOO_SHORT' %}
+          Review the EV target, expected return time, charging deadline, and
+          simultaneous charging setting.
+        {% else %}
+          Review the remaining Powerwall and EV requirements before approving
+          any late grid support.
+        {% endif %}
+
+      notification_message: >-
+        {{ warning_reason }}
+
+        Powerwall: {{ states('sensor.hems_effective_powerwall') }}%
+        (target {{ states('input_number.powerwall_target') }}%,
+        {{ states('sensor.powerwall_energy_required') }} kWh remaining).
+
+        {{ ev_plan_display }}
+
+        Cheap grid before target:
+        {{ states('sensor.hems_cheap_grid_minutes_before_target') }} minutes.
+        Cheapest visible price:
+        {{ cheapest_price_display }}.
+
+        Automatic grid charging:
+        {{ states('input_boolean.automatic_grid_charging_enabled') }}.
+        Simultaneous grid charging:
+        {{ states(
+          'input_boolean.hems_simultaneous_grid_charging_allowed'
+        ) }}.
+
+        {{ suggested_action }}
+
+      ev_notification: >-
+        {% set explicit_ev_warning = warning_state in [
+          'EV_RETURN_TIME_REQUIRED',
+          'EV_RETURN_DATE_MISMATCH',
+          'WARNING_EV_RETURN_OVERDUE',
+          'WARNING_EV_RETURN_AFTER_DEADLINE',
+          'WARNING_EV_RETURN_WINDOW_TOO_SHORT'
+        ] %}
+        {% set availability = states('sensor.ev_charging_availability') %}
+        {% set soc_raw = states('sensor.hems_effective_ev_soc') %}
+        {% set target_raw = states('sensor.hems_ev_target_today') %}
+        {% set active_ev_shortfall = (
+          is_number(soc_raw)
+          and is_number(target_raw)
+          and (soc_raw | float) < (target_raw | float)
+          and (
+            availability in ['READY', 'CHARGING']
+            or is_state('input_boolean.ev_expected_back_today', 'on')
+          )
+        ) %}
+        {{ explicit_ev_warning or active_ev_shortfall }}
+
+  - action: notify.mobile_app_primary_phone
+    continue_on_error: true
+    data:
+      title: "HEMS charging target warning"
+      message: "{{ notification_message }}"
+      data:
+        tag: hems_charging_deadline_warning
+        alert_once: true
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ ev_notification }}"
+        sequence:
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: "HEMS charging target warning"
+              message: "{{ notification_message }}"
+              data:
+                tag: hems_charging_deadline_warning
+                alert_once: true
+
+mode: single
+max_exceeded: silent

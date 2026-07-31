@@ -1,0 +1,63 @@
+alias: HEMS - EV Powerwall Hold Latch
+description: >-
+  Maintains the EV session Powerwall floor helper. Before midday the EV Worker
+  records the session-start SOC and the existing early-flexible policy remains
+  authoritative. At and after 12:00, this latch raises the floor to at least
+  80%, then ratchets it upward whenever the real Powerwall reaches a higher SOC.
+  It never lowers the floor during the active EV session. The helper is ignored
+  as soon as the EV session finishes. This automation only updates a HEMS helper
+  and never directly controls either device.
+triggers:
+  - trigger: state
+    entity_id: input_boolean.hems_ev_worker_session_active
+    to: "on"
+  - trigger: state
+    entity_id: sensor.house_home_energy_gateway_teslemetry_percentage_charged
+  - trigger: time
+    at: "12:00:00"
+  - trigger: time_pattern
+    minutes: /1
+conditions:
+  - condition: state
+    entity_id: input_boolean.hems_ev_worker_session_active
+    state: "on"
+  - condition: template
+    value_template: >-
+      {{
+        states('input_select.hems_ev_worker_session_type') in [
+          'cheap_grid',
+          'urgent_recovery',
+          'approved_recovery'
+        ]
+        and now() >= today_at('12:00:00')
+        and
+        is_number(states(
+          'sensor.house_home_energy_gateway_teslemetry_percentage_charged'
+        ))
+        and is_number(states(
+          'input_number.hems_ev_session_start_powerwall_soc'
+        ))
+      }}
+actions:
+  - variables:
+      current_soc: >-
+        {{
+          states(
+            'sensor.house_home_energy_gateway_teslemetry_percentage_charged'
+          ) | float
+        }}
+      stored_floor: >-
+        {{
+          states('input_number.hems_ev_session_start_powerwall_soc') | float
+        }}
+      required_floor: >-
+        {{ [80, current_soc, stored_floor] | max | round(0) }}
+  - condition: template
+    value_template: "{{ required_floor | float > stored_floor + 0.4 }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_ev_session_start_powerwall_soc
+    data:
+      value: "{{ [[required_floor | float, 0] | max, 100] | min }}"
+mode: single
+max_exceeded: silent

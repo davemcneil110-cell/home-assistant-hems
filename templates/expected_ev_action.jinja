@@ -1,0 +1,109 @@
+{% set permission = states('sensor.hems_ev_charge_permission') %}
+{% set charging_raw = states(
+  'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+) %}
+{% set charger_mode = states(
+  'sensor.solaredge_ev_charger_ev_charger_mode'
+) %}
+{% set excess_solar_status = states(
+  'sensor.solaredge_ev_charger_ev_excess_solar_status'
+) %}
+{% set charging = charging_raw == 'on' %}
+
+{% if is_state('input_boolean.hems_ev_manual_override', 'on') %}
+  MANUAL_OVERRIDE
+
+{% elif is_state('input_boolean.enable_ev_automation', 'off') %}
+  AUTOMATION_DISABLED
+
+{% elif charging_raw not in ['on', 'off'] %}
+  CHARGER_STATE_UNAVAILABLE
+
+{% elif permission == 'TEST_CONFLICT' %}
+  TEST_CONFLICT
+
+{% elif permission == 'INPUT_UNAVAILABLE' %}
+  {% if charging %}
+    STOP_INPUT_UNAVAILABLE
+  {% else %}
+    INPUT_UNAVAILABLE
+  {% endif %}
+
+{% elif permission == 'EV_UNAVAILABLE' %}
+  {% if charging %}
+    STOP_EV_UNAVAILABLE
+  {% else %}
+    EV_UNAVAILABLE
+  {% endif %}
+
+{% elif permission == 'EV_TARGET_MET' %}
+  {% if charging %}
+    STOP_TARGET_MET
+  {% else %}
+    TARGET_MET
+  {% endif %}
+
+{% elif permission in [
+    'EV_URGENT_START_TO_50',
+    'EV_URGENT_CONTINUE_TO_50'
+  ] %}
+  {% if charging %}
+    CONTINUE_URGENT_TO_50
+  {% else %}
+    START_URGENT_TO_50
+  {% endif %}
+
+{% elif permission == 'ALLOW_CHEAP_GRID' %}
+  {% if charging %}
+    CONTINUE_CHEAP_GRID_TO_TARGET
+  {% else %}
+    START_CHEAP_GRID_TO_TARGET
+  {% endif %}
+
+{% elif permission == 'EV_APPROVED_CHARGE_NOW' %}
+  {% if charging %}
+    CONTINUE_APPROVED_CHARGE_TO_TARGET
+  {% else %}
+    START_APPROVED_CHARGE_TO_TARGET
+  {% endif %}
+
+{% elif permission == 'ALLOW_EXCESS_SOLAR' %}
+  {% if charger_mode == 'Auto'
+        and excess_solar_status == 'Enabled'
+        and charging %}
+    CONTINUE_NATIVE_EXCESS_SOLAR
+  {% elif charger_mode == 'Auto'
+        and excess_solar_status == 'Enabled' %}
+    WAIT_NATIVE_EXCESS_SOLAR
+  {% elif charger_mode == 'Auto'
+        and excess_solar_status == 'Disabled' %}
+    NATIVE_EXCESS_SOLAR_CONTROL_REQUIRED
+  {% elif charger_mode == 'Manual' and charging %}
+    STOP_MANUAL_CHARGE_EXCESS_ONLY
+  {% elif charger_mode == 'Manual' %}
+    NATIVE_EXCESS_SOLAR_CONTROL_REQUIRED
+  {% else %}
+    CHARGER_MODE_UNAVAILABLE
+  {% endif %}
+
+{% elif permission == 'EV_RECOVERY_APPROVAL_REQUIRED' %}
+  {% if charging %}
+    STOP_PERMISSION_WITHDRAWN
+  {% else %}
+    WAIT_RECOVERY_APPROVAL
+  {% endif %}
+
+{% elif permission == 'BLOCK_WAIT_FOR_EXCESS_SOLAR_OR_CHEAP_GRID' %}
+  {% if charging %}
+    STOP_PERMISSION_WITHDRAWN
+  {% else %}
+    WAIT_SOLAR_OR_CHEAP_GRID
+  {% endif %}
+
+{% else %}
+  {% if charging %}
+    STOP_INPUT_UNAVAILABLE
+  {% else %}
+    INPUT_UNAVAILABLE
+  {% endif %}
+{% endif %}

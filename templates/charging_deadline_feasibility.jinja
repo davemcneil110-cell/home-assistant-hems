@@ -1,0 +1,282 @@
+{% set capacity_kwh = 60.4 %}
+{% set availability = states('sensor.ev_charging_availability') %}
+{% set ev_connected = availability in ['READY', 'CHARGING'] %}
+{% set ev_expected_back = is_state(
+    'input_boolean.ev_expected_back_today',
+    'on'
+  ) %}
+{% set return_entity = 'input_datetime.hems_ev_expected_return_time' %}
+{% set return_raw = states(return_entity) %}
+{% set return_has_date = state_attr(return_entity, 'has_date') == true %}
+{% set return_has_time = state_attr(return_entity, 'has_time') == true %}
+{% set return_timestamp_raw = state_attr(return_entity, 'timestamp') %}
+{% set return_valid = return_has_date
+    and return_has_time
+    and is_number(return_timestamp_raw) %}
+{% set return_timestamp = return_timestamp_raw | float(0) %}
+{% set return_date_matches = return_valid
+    and return_raw[0:10] == now().strftime('%Y-%m-%d') %}
+
+{% set soc_raw = states('sensor.hems_effective_ev_soc') %}
+{% set target_raw = states('sensor.hems_ev_target_today') %}
+{% set ev_inputs_valid = is_number(soc_raw)
+    and is_number(target_raw) %}
+{% set powerwall_required_raw = states(
+    'sensor.powerwall_energy_required'
+  ) %}
+{% set cheap_minutes_raw = states(
+    'sensor.hems_cheap_grid_minutes_before_target'
+  ) %}
+{% set ev_rate_raw = states(
+    'input_number.hems_ev_planning_charge_power'
+  ) %}
+{% set powerwall_rate_raw = states(
+    'input_number.hems_powerwall_planning_charge_power'
+  ) %}
+{% set forecast_status = states(
+    'input_text.hems_advanced_forecast_status'
+  ) %}
+{% set latest_end_raw = states(
+    'input_datetime.hems_advanced_forecast_latest_end'
+  ) %}
+{% set updated_raw = states(
+    'input_datetime.hems_advanced_forecast_last_updated'
+  ) %}
+{% set latest_end = as_datetime(latest_end_raw, none) %}
+{% set updated = as_datetime(updated_raw, none) %}
+{% set target_time_raw = states(
+    'input_datetime.hems_charging_target_time'
+  ) %}
+{% set target_time = target_time_raw
+    if target_time_raw not in ['unknown', 'unavailable', 'none', '']
+    else '14:30:00' %}
+{% set deadline = today_at(target_time) %}
+{% set now_timestamp = as_timestamp(now()) %}
+{% set deadline_timestamp = as_timestamp(deadline) %}
+
+{% set powerwall_inputs_valid = is_number(powerwall_required_raw)
+    and is_number(powerwall_rate_raw) %}
+{% set ev_rate_valid = is_number(ev_rate_raw) %}
+{% set forecast_status_valid = forecast_status in [
+    'VALID_ADVANCED',
+    'VALID_WITH_PER_KWH_FALLBACK'
+  ] %}
+{% set cache_fresh = updated is not none
+    and (as_timestamp(now()) - as_timestamp(updated)) >= 0
+    and (as_timestamp(now()) - as_timestamp(updated)) <= 900 %}
+{% set forecast_cache_valid = forecast_status_valid
+    and cache_fresh
+    and latest_end is not none
+    and is_number(cheap_minutes_raw) %}
+
+{% if availability == 'TEST_CONFLICT' %}
+  TEST_CONFLICT
+{% elif not powerwall_inputs_valid %}
+  INPUT_UNAVAILABLE
+{% elif (ev_connected or ev_expected_back)
+      and (not ev_inputs_valid or not ev_rate_valid) %}
+  INPUT_UNAVAILABLE
+{% else %}
+  {% set powerwall_required = [
+      powerwall_required_raw | float,
+      0
+    ] | max %}
+  {% set powerwall_needs_charge = powerwall_required > 0.05 %}
+
+  {% if ev_inputs_valid %}
+    {% set soc = soc_raw | float %}
+    {% set target = target_raw | float %}
+    {% set ev_required = [
+        ((target - soc) / 100) * capacity_kwh,
+        0
+      ] | max %}
+  {% else %}
+    {% set soc = 0 %}
+    {% set target = 0 %}
+    {% set ev_required = 0 %}
+  {% endif %}
+
+  {% set ev_needs_charge = ev_required > 0.05 %}
+  {% set ev_active_now = ev_needs_charge and ev_connected %}
+  {% set ev_active_later = ev_needs_charge
+      and ev_expected_back
+      and not ev_connected %}
+  {% set ev_is_active = ev_active_now or ev_active_later %}
+
+  {% if not powerwall_needs_charge and not ev_is_active %}
+    {% if ev_needs_charge and availability == 'AWAY' %}
+      EV_AWAY_EXCLUDED
+    {% elif ev_needs_charge %}
+      EV_NOT_CONNECTED
+    {% else %}
+      TARGETS_MET
+    {% endif %}
+
+  {% elif ev_active_later and not return_valid %}
+    EV_RETURN_TIME_REQUIRED
+
+  {% elif ev_active_later and not return_date_matches %}
+    EV_RETURN_DATE_MISMATCH
+
+  {% elif now_timestamp >= deadline_timestamp %}
+    WARNING_DEADLINE_PASSED_WITH_SHORTFALL
+
+  {% elif ev_active_later and return_timestamp <= now_timestamp %}
+    WARNING_EV_RETURN_OVERDUE
+
+  {% elif ev_active_later and return_timestamp >= deadline_timestamp %}
+    WARNING_EV_RETURN_AFTER_DEADLINE
+
+  {% else %}
+    {% set cheap_minutes = [
+        cheap_minutes_raw | float(0),
+        0
+      ] | max %}
+    {% set ev_rate = ev_rate_raw | float(0) %}
+    {% set powerwall_rate = powerwall_rate_raw | float(0) %}
+    {% set total_minutes = [
+        (deadline_timestamp - now_timestamp) / 60,
+        0
+      ] | max %}
+    {% set ev_start_timestamp = return_timestamp
+        if ev_active_later else now_timestamp %}
+    {% set ev_available_minutes = [
+        (deadline_timestamp - ev_start_timestamp) / 60,
+        0
+      ] | max %}
+    {% set active_ev_required = ev_required
+        if ev_is_active else 0 %}
+
+    {% if powerwall_rate <= 0
+          or (ev_is_active and ev_rate <= 0) %}
+      INPUT_UNAVAILABLE
+    {% else %}
+      {% set ev_total_minutes = (
+          active_ev_required / ev_rate
+        ) * 60 %}
+      {% set powerwall_minutes = (
+          powerwall_required / powerwall_rate
+        ) * 60 %}
+
+      {% if ev_active_later %}
+        {% set minutes_before_return = [
+            (return_timestamp - now_timestamp) / 60,
+            0
+          ] | max %}
+
+        {% if is_state(
+            'input_boolean.hems_simultaneous_grid_charging_allowed',
+            'on'
+          ) %}
+          {% set physical_time_valid =
+              powerwall_minutes <= total_minutes + 1
+              and ev_total_minutes <= ev_available_minutes + 1 %}
+        {% else %}
+          {% set powerwall_after_return = [
+              powerwall_minutes - minutes_before_return,
+              0
+            ] | max %}
+          {% set physical_time_valid =
+              powerwall_minutes <= total_minutes + 1
+              and (powerwall_after_return + ev_total_minutes)
+                <= ev_available_minutes + 1 %}
+        {% endif %}
+
+        {% set horizon_complete = forecast_cache_valid
+            and as_timestamp(latest_end) >= deadline_timestamp %}
+
+        {% if not physical_time_valid %}
+          WARNING_EV_RETURN_WINDOW_TOO_SHORT
+        {% elif powerwall_needs_charge and not forecast_cache_valid %}
+          MONITOR_AMBER_FORECAST_INCOMPLETE
+        {% elif powerwall_needs_charge
+              and cheap_minutes + 1 < powerwall_minutes
+              and horizon_complete %}
+          WARNING_NOT_ENOUGH_CHEAP_TIME
+        {% else %}
+          MONITOR_EV_RETURN_CHEAP_WINDOW
+        {% endif %}
+
+      {% else %}
+        {% set approved_charge_now = ev_active_now
+            and is_state(
+              'input_boolean.hems_ev_recovery_approved',
+              'on'
+            )
+            and soc < target %}
+        {% set urgent_recovery = ev_active_now and (
+            soc <= 30
+            or (
+              is_state(
+                'input_boolean.hems_ev_urgent_charge_active',
+                'on'
+              )
+              and soc < 50
+            )
+          ) %}
+        {% set forced_recovery = approved_charge_now or urgent_recovery %}
+        {% set forced_target = target
+            if approved_charge_now
+            else [50, target] | min %}
+        {% set forced_energy = ([
+            ((forced_target - soc) / 100) * capacity_kwh,
+            0
+          ] | max) if forced_recovery else 0 %}
+        {% set forced_energy = [
+            forced_energy,
+            active_ev_required
+          ] | min %}
+        {% set forced_minutes = (forced_energy / ev_rate) * 60
+            if ev_active_now else 0 %}
+        {% set ev_cheap_minutes = (
+            [active_ev_required - forced_energy, 0] | max
+          ) / ev_rate * 60 if ev_active_now else 0 %}
+        {% set cheap_minutes_after_forced = [
+            cheap_minutes - forced_minutes,
+            0
+          ] | max %}
+
+        {% if is_state(
+            'input_boolean.hems_simultaneous_grid_charging_allowed',
+            'on'
+          ) %}
+          {% set required_cheap_minutes = [
+              ev_cheap_minutes,
+              powerwall_minutes
+            ] | max %}
+          {% set required_physical_minutes = [
+              forced_minutes + ev_cheap_minutes,
+              powerwall_minutes
+            ] | max %}
+          {% set feasible_state = 'FEASIBLE_SIMULTANEOUS' %}
+        {% else %}
+          {% set required_cheap_minutes = (
+              ev_cheap_minutes
+              + powerwall_minutes
+            ) %}
+          {% set required_physical_minutes = (
+              forced_minutes
+              + required_cheap_minutes
+            ) %}
+          {% set feasible_state = 'FEASIBLE_EV_FIRST_SEQUENTIAL' %}
+        {% endif %}
+
+        {% set horizon_complete = forecast_cache_valid
+            and as_timestamp(latest_end) >= deadline_timestamp %}
+
+        {% if total_minutes + 1 < required_physical_minutes %}
+          WARNING_NOT_ENOUGH_PHYSICAL_TIME
+        {% elif not forecast_cache_valid %}
+          MONITOR_AMBER_FORECAST_INCOMPLETE
+        {% elif cheap_minutes_after_forced + 1
+              >= required_cheap_minutes %}
+          {{ feasible_state }}
+        {% elif not horizon_complete %}
+          MONITOR_AMBER_FORECAST_INCOMPLETE
+        {% else %}
+          WARNING_NOT_ENOUGH_CHEAP_TIME
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+{% endif %}

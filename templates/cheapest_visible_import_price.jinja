@@ -1,0 +1,32 @@
+{% set status = states('input_text.hems_advanced_forecast_status') %}
+{% set cached_price = states(
+    'input_number.hems_advanced_cheapest_visible_import_price'
+  ) %}
+{% set updated_raw = states(
+    'input_datetime.hems_advanced_forecast_last_updated'
+  ) %}
+{% set updated = as_datetime(updated_raw, none) %}
+{% set target_time_raw = states(
+    'input_datetime.hems_charging_target_time'
+  ) %}
+{% set target_time = target_time_raw
+    if target_time_raw not in ['unknown', 'unavailable', 'none', '']
+    else '14:30:00' %}
+{% set deadline = today_at(target_time) %}
+{% set cache_fresh = updated is not none
+    and (as_timestamp(now()) - as_timestamp(updated)) >= 0
+    and (as_timestamp(now()) - as_timestamp(updated)) <= 900 %}
+{% set status_valid = status in [
+    'VALID_ADVANCED',
+    'VALID_WITH_PER_KWH_FALLBACK'
+  ] %}
+
+{% if now() >= deadline %}
+  unknown
+{% elif not status_valid
+      or not cache_fresh
+      or not is_number(cached_price) %}
+  unknown
+{% else %}
+  {{ cached_price | float | round(3) }}
+{% endif %}

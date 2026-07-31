@@ -1,0 +1,32 @@
+{% set status = states('input_text.hems_advanced_forecast_status') %}
+{% set cached_minutes = states(
+    'input_number.hems_advanced_cheap_grid_minutes_before_target'
+  ) %}
+{% set updated_raw = states(
+    'input_datetime.hems_advanced_forecast_last_updated'
+  ) %}
+{% set updated = as_datetime(updated_raw, none) %}
+{% set target_time_raw = states(
+    'input_datetime.hems_charging_target_time'
+  ) %}
+{% set target_time = target_time_raw
+    if target_time_raw not in ['unknown', 'unavailable', 'none', '']
+    else '14:30:00' %}
+{% set deadline = today_at(target_time) %}
+{% set cache_fresh = updated is not none
+    and (as_timestamp(now()) - as_timestamp(updated)) >= 0
+    and (as_timestamp(now()) - as_timestamp(updated)) <= 900 %}
+{% set status_valid = status in [
+    'VALID_ADVANCED',
+    'VALID_WITH_PER_KWH_FALLBACK'
+  ] %}
+
+{% if now() >= deadline %}
+  0
+{% elif not status_valid
+      or not cache_fresh
+      or not is_number(cached_minutes) %}
+  unknown
+{% else %}
+  {{ cached_minutes | float | round(0) | int }}
+{% endif %}

@@ -1,0 +1,80 @@
+{% set capacity_kwh = 60.4 %}
+{% set availability = states('sensor.ev_charging_availability') %}
+{% set soc_raw = states('sensor.hems_effective_ev_soc') %}
+{% set target_raw = states('sensor.hems_ev_target_today') %}
+{% set current_price_raw = states('sensor.hems_effective_import_price') %}
+{% set cheapest_price_raw = states('sensor.hems_cheapest_visible_import_price') %}
+{% set maximum_price_raw = states(
+  'sensor.hems_effective_grid_charge_price_limit'
+) %}
+{% set cheap_minutes_raw = states('sensor.hems_cheap_grid_minutes_before_target') %}
+{% set charge_power_raw = states('input_number.hems_ev_planning_charge_power') %}
+{% set target_time_raw = states('input_datetime.hems_charging_target_time') %}
+{% set target_time = target_time_raw
+    if target_time_raw not in ['unknown', 'unavailable', 'none', '']
+    else '14:30:00' %}
+{% set deadline = today_at(target_time) %}
+
+{% set target_inputs_valid = is_number(soc_raw)
+    and is_number(target_raw) %}
+{% set planning_inputs_valid = is_number(current_price_raw)
+    and is_number(maximum_price_raw)
+    and is_number(cheap_minutes_raw)
+    and is_number(charge_power_raw) %}
+
+{% if availability == 'TEST_CONFLICT' %}
+  TEST_CONFLICT
+{% elif not target_inputs_valid %}
+  INPUT_UNAVAILABLE
+{% else %}
+  {% set soc = soc_raw | float %}
+  {% set target = target_raw | float %}
+  {% set energy_required = ([
+      ((target - soc) / 100) * capacity_kwh,
+      0
+    ] | max) %}
+
+  {% if soc >= target or energy_required <= 0.05 %}
+    TARGET_MET
+  {% elif availability not in ['READY', 'CHARGING'] %}
+    EV_UNAVAILABLE
+  {% elif not planning_inputs_valid %}
+    INPUT_UNAVAILABLE
+  {% else %}
+    {% set current_price = current_price_raw | float %}
+    {% set maximum_price = maximum_price_raw | float %}
+    {% set cheap_minutes = [cheap_minutes_raw | float, 0] | max %}
+    {% set charge_power = charge_power_raw | float %}
+
+    {% if charge_power <= 0 %}
+      INPUT_UNAVAILABLE
+    {% elif soc <= 30
+          or (is_state('input_boolean.hems_ev_urgent_charge_active', 'on')
+              and soc < 50) %}
+      CHARGE_NOW_URGENT_OVERRIDE
+    {% elif is_state('input_boolean.hems_ev_recovery_approved', 'on')
+          and soc < target %}
+      CHARGE_NOW_APPROVED_TO_TARGET
+    {% elif now() >= deadline %}
+      DEADLINE_PASSED
+    {% elif current_price > maximum_price %}
+      WAIT_PRICE_ABOVE_LIMIT
+    {% elif not is_number(cheapest_price_raw) %}
+      FORECAST_UNAVAILABLE
+    {% else %}
+      {% set cheapest_price = cheapest_price_raw | float %}
+      {% set required_minutes = (energy_required / charge_power) * 60 %}
+      {% set at_cheapest_visible = current_price <= cheapest_price + 0.005 %}
+      {% set all_remaining_cheap_time_needed =
+          cheap_minutes <= required_minutes + 5 %}
+
+      {% if at_cheapest_visible %}
+        CHARGE_NOW_CHEAPEST_VISIBLE
+      {% elif all_remaining_cheap_time_needed %}
+        CHARGE_NOW_REQUIRED_CHEAP_WINDOW
+      {% else %}
+        WAIT_FOR_CHEAPER_VISIBLE_INTERVAL
+      {% endif %}
+    {% endif %}
+  {% endif %}
+{% endif %}

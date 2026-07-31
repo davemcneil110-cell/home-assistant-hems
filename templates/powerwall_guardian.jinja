@@ -1,0 +1,46 @@
+{% set automatic = is_state(
+  'input_boolean.automatic_grid_charging_enabled', 'on'
+) %}
+{% set manual_override = is_state(
+  'input_boolean.hems_powerwall_manual_override', 'on'
+) %}
+{% set desired_mode = states('sensor.hems_coordinated_powerwall_mode') %}
+{% set desired_reserve_raw = states(
+  'sensor.hems_coordinated_powerwall_reserve'
+) %}
+{% set actual_mode = states(
+  'select.house_home_energy_gateway_teslemetry_operation_mode'
+) %}
+{% set actual_reserve_raw = states(
+  'number.house_home_energy_gateway_teslemetry_backup_reserve'
+) %}
+{% if manual_override %}
+  🔵 MANUAL OVERRIDE
+
+{% elif not automatic %}
+  ⚪ AUTOMATION DISABLED
+
+{% elif desired_mode not in ['backup', 'self_consumption']
+      or not is_number(desired_reserve_raw) %}
+  🟠 INPUT UNAVAILABLE
+
+{% elif actual_mode not in ['backup', 'self_consumption']
+      or not is_number(actual_reserve_raw) %}
+  🔴 DEVICE UNAVAILABLE
+
+{% else %}
+  {% set reserve_matches = (
+    (actual_reserve_raw | float) - (desired_reserve_raw | float)
+  ) | abs < 0.5 %}
+  {% set mode_matches = actual_mode == desired_mode %}
+
+  {% if mode_matches and reserve_matches %}
+    🟢 HEALTHY
+  {% elif not mode_matches and not reserve_matches %}
+    🟠 MODE AND RESERVE MISMATCH
+  {% elif not mode_matches %}
+    🟠 MODE MISMATCH
+  {% else %}
+    🟠 RESERVE MISMATCH
+  {% endif %}
+{% endif %}

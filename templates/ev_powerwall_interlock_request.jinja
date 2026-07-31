@@ -1,0 +1,154 @@
+{% set active = states('input_boolean.hems_ev_worker_session_active') %}
+{% set session_type = states('input_select.hems_ev_worker_session_type') %}
+{% set simultaneous = states(
+  'input_boolean.hems_simultaneous_grid_charging_allowed'
+) %}
+
+{% set current_price_raw = states('sensor.hems_effective_import_price') %}
+{% set maximum_price_raw = states(
+  'sensor.hems_effective_grid_charge_price_limit'
+) %}
+{% set cheapest_price_raw = states(
+  'sensor.hems_cheapest_visible_import_price'
+) %}
+{% set cheap_minutes_raw = states(
+  'sensor.hems_cheap_grid_minutes_before_target'
+) %}
+{% set ev_required_raw = states('sensor.ev_energy_required') %}
+{% set powerwall_required_raw = states('sensor.powerwall_energy_required') %}
+{% set ev_rate_raw = states('input_number.hems_ev_planning_charge_power') %}
+{% set powerwall_rate_raw = states(
+  'input_number.hems_powerwall_planning_charge_power'
+) %}
+{% set powerwall_soc_raw = states('sensor.hems_effective_powerwall') %}
+{% set minimum_reserve_raw = states('input_number.minimum_power_reserve') %}
+{% set feasibility = states('sensor.hems_charging_deadline_feasibility') %}
+
+{% set forecast_status = states('input_text.hems_advanced_forecast_status') %}
+{% set latest_end = as_datetime(states(
+  'input_datetime.hems_advanced_forecast_latest_end'
+), none) %}
+{% set updated = as_datetime(states(
+  'input_datetime.hems_advanced_forecast_last_updated'
+), none) %}
+
+{% set target_time_raw = states('input_datetime.hems_charging_target_time') %}
+{% set target_time = target_time_raw
+    if target_time_raw not in ['unknown', 'unavailable', 'none', '']
+    else '14:30:00' %}
+{% set deadline = today_at(target_time) %}
+{% set deadline_timestamp = as_timestamp(deadline) %}
+{% set midday_timestamp = as_timestamp(today_at('12:00:00')) %}
+{% set now_timestamp = as_timestamp(now()) %}
+
+{% set price_inputs_valid = is_number(current_price_raw)
+    and is_number(maximum_price_raw) %}
+{% set current_cheap = price_inputs_valid
+    and (current_price_raw | float) <= (maximum_price_raw | float) %}
+
+{% set forecast_status_valid = forecast_status in [
+  'VALID_ADVANCED',
+  'VALID_WITH_PER_KWH_FALLBACK'
+] %}
+{% set cache_fresh = updated is not none
+    and (now_timestamp - as_timestamp(updated)) >= 0
+    and (now_timestamp - as_timestamp(updated)) <= 900 %}
+{% set horizon_complete = latest_end is not none
+    and as_timestamp(latest_end) >= deadline_timestamp %}
+
+{% set recovery_inputs_valid = is_number(cheap_minutes_raw)
+    and is_number(cheapest_price_raw)
+    and is_number(ev_required_raw)
+    and is_number(powerwall_required_raw)
+    and is_number(ev_rate_raw)
+    and is_number(powerwall_rate_raw)
+    and is_number(powerwall_soc_raw)
+    and is_number(minimum_reserve_raw)
+    and (ev_rate_raw | float) > 0
+    and (powerwall_rate_raw | float) > 0 %}
+
+{% if recovery_inputs_valid %}
+  {% set ev_minutes = (
+      [ev_required_raw | float, 0] | max
+    ) / (ev_rate_raw | float) * 60 %}
+  {% set powerwall_minutes = (
+      [powerwall_required_raw | float, 0] | max
+    ) / (powerwall_rate_raw | float) * 60 %}
+  {% if simultaneous == 'on' %}
+    {% set recovery_minutes = [ev_minutes, powerwall_minutes] | max %}
+    {% set feasibility_valid = feasibility == 'FEASIBLE_SIMULTANEOUS' %}
+  {% else %}
+    {% set recovery_minutes = ev_minutes + powerwall_minutes %}
+    {% set feasibility_valid = feasibility
+        == 'FEASIBLE_EV_FIRST_SEQUENTIAL' %}
+  {% endif %}
+{% else %}
+  {% set recovery_minutes = 99999 %}
+  {% set feasibility_valid = false %}
+{% endif %}
+
+{% set early_discharge_allowed =
+    now_timestamp < midday_timestamp
+    and not current_cheap
+    and forecast_status_valid
+    and cache_fresh
+    and horizon_complete
+    and recovery_inputs_valid
+    and feasibility_valid
+    and (cheapest_price_raw | float) <= (maximum_price_raw | float)
+    and (cheap_minutes_raw | float) >= recovery_minutes + 30
+    and (powerwall_soc_raw | float) > (minimum_reserve_raw | float)
+    and is_state('input_boolean.automatic_grid_charging_enabled', 'on')
+    and is_state('input_boolean.hems_powerwall_manual_override', 'off') %}
+
+{% if active not in ['on', 'off'] %}
+  INPUT_UNAVAILABLE
+
+{% elif active == 'off' %}
+  NO_REQUEST
+
+{% elif session_type in ['unknown', 'unavailable', ''] %}
+  INPUT_UNAVAILABLE
+
+{% elif session_type == 'none' %}
+  SESSION_STATE_CONFLICT
+
+{% elif session_type == 'cheap_grid' %}
+  {% if simultaneous == 'on' %}
+    REQUEST_CHEAP_GRID_CHARGE_AND_HOLD
+  {% elif simultaneous == 'off' %}
+    REQUEST_CHEAP_GRID_HOLD_ONLY
+  {% else %}
+    INPUT_UNAVAILABLE
+  {% endif %}
+
+{% elif session_type == 'urgent_recovery' %}
+  {# Below 30% the EV must charge to its 50% recovery minimum. Before the
+     fixed midday boundary, permit the Powerwall to remain in self-consumption only
+     when the verified Amber horizon contains enough later cheap-grid time to
+     recover both active targets with a 30-minute margin. Once cheap grid is
+     actually present, coordinate simultaneous charging when allowed. #}
+  {% if current_cheap and simultaneous == 'on' %}
+    REQUEST_CHEAP_GRID_CHARGE_AND_HOLD
+  {% elif current_cheap and simultaneous == 'off' %}
+    REQUEST_CHEAP_GRID_HOLD_ONLY
+  {% elif early_discharge_allowed %}
+    REQUEST_EARLY_FLEXIBLE_DISCHARGE
+  {% else %}
+    REQUEST_URGENT_HOLD_ONLY
+  {% endif %}
+
+{% elif session_type == 'approved_recovery' %}
+  {% if current_cheap and simultaneous == 'on' %}
+    REQUEST_CHEAP_GRID_CHARGE_AND_HOLD
+  {% elif current_cheap and simultaneous == 'off' %}
+    REQUEST_CHEAP_GRID_HOLD_ONLY
+  {% elif early_discharge_allowed %}
+    REQUEST_EARLY_FLEXIBLE_DISCHARGE
+  {% else %}
+    REQUEST_APPROVED_HOLD_ONLY
+  {% endif %}
+
+{% else %}
+  INVALID_SESSION_TYPE
+{% endif %}

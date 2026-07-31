@@ -1,0 +1,460 @@
+alias: HEMS - EV Departure and Return Planner
+description: >-
+  Asks primary user and secondary EV user whether an EV that leaves below a persistent target will
+  return for more charging. An Until Unplugged session instead accepts its
+  remaining shortfall without a return or deadline warning. The first phone
+  response updates the shared HEMS plan. This automation only sends EV
+  notifications and updates planning helpers; it never controls hardware.
+triggers:
+  - trigger: template
+    value_template: >-
+      {{
+        is_state('sensor.ev_charging_availability', 'AWAY')
+        and is_state('input_boolean.hems_test_ev_away', 'off')
+        and is_state(
+          'input_boolean.hems_test_ev_home_plugged_low_soc',
+          'off'
+        )
+      }}
+    for: "00:02:00"
+    id: departed
+  - trigger: state
+    entity_id: input_boolean.hems_test_ev_away
+    to: "on"
+    for: "00:00:05"
+    id: test_departed
+  - trigger: state
+    entity_id: sensor.ev_charging_availability
+    to: READY
+    for: "00:00:30"
+    id: returned_ready
+  - trigger: state
+    entity_id: sensor.ev_charging_availability
+    to: CHARGING
+    for: "00:00:30"
+    id: returned_charging
+  - trigger: time
+    at: "00:05:00"
+    id: daily_reset
+conditions: []
+actions:
+  - choose:
+      # A persistent Until Target/Until Full commitment remains in the plan
+      # after arrival. Ordinary arrivals clear any stale return marker.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id in ['returned_ready', 'returned_charging'] }}
+        sequence:
+          - if:
+              - condition: state
+                entity_id: input_boolean.hems_ev_recovery_approved
+                state: "off"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.ev_expected_back_today
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+
+      # Commitment Reset owns the daily approval/Long Drive cleanup. This
+      # planner independently clears only its return-plan marker.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'daily_reset' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.ev_expected_back_today
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+
+      # Until Unplugged is deliberately best effort. Once the connection ends,
+      # accept the remaining shortfall and leave EV Expected Back Today off so
+      # the deadline engine excludes it. The approval remains as a marker until
+      # the next real connection or daily reset.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id in ['departed', 'test_departed'] }}
+          - condition: state
+            entity_id: input_boolean.hems_ev_recovery_approved
+            state: "on"
+          - condition: state
+            entity_id: input_boolean.ev_expected_back_today
+            state: "off"
+          - condition: template
+            value_template: >-
+              {% set soc = states('sensor.hems_effective_ev_soc') %}
+              {% set target = states('sensor.hems_ev_target_today') %}
+              {{
+                is_number(soc)
+                and is_number(target)
+                and (soc | float) < (target | float)
+              }}
+        sequence:
+          - variables:
+              ev_soc: "{{ states('sensor.hems_effective_ev_soc') }}"
+              ev_target: "{{ states('sensor.hems_ev_target_today') }}"
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV best-effort session complete
+              message: >-
+                The EV was unplugged at {{ ev_soc }}% before today's
+                {{ ev_target }}% target. This Until Unplugged shortfall is
+                accepted, the EV is excluded from the remaining plan, and no
+                return or deadline warning is required.
+              data:
+                tag: hems_ev_return_plan_result
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV best-effort session complete
+              message: >-
+                The EV was unplugged at {{ ev_soc }}% before today's
+                {{ ev_target }}% target. This Until Unplugged shortfall is
+                accepted, the EV is excluded from the remaining plan, and no
+                return or deadline warning is required.
+              data:
+                tag: hems_ev_return_plan_result
+                alert_once: true
+
+      # Ordinary departures and persistent Until Target/Until Full commitments
+      # ask whether the EV will return. The first response from either phone wins.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id in ['departed', 'test_departed'] }}
+          - condition: template
+            value_template: >-
+              {{
+                trigger.id == 'test_departed'
+                or (
+                  is_state('input_boolean.hems_test_ev_away', 'off')
+                  and is_state(
+                    'input_boolean.hems_test_ev_home_plugged_low_soc',
+                    'off'
+                  )
+                )
+              }}
+          - condition: template
+            value_template: >-
+              {{
+                is_state('input_boolean.ev_expected_back_today', 'off')
+                or is_state('input_boolean.hems_ev_recovery_approved', 'on')
+              }}
+          - condition: template
+            value_template: >-
+              {% set soc = states('sensor.hems_effective_ev_soc') %}
+              {% set target = states('sensor.hems_ev_target_today') %}
+              {{
+                is_number(soc)
+                and is_number(target)
+                and (soc | float) < (target | float)
+              }}
+          - condition: template
+            value_template: >-
+              {% set configured = states(
+                'input_datetime.hems_charging_target_time'
+              ) %}
+              {% set target_time = configured
+                if configured not in [
+                  'unknown', 'unavailable', 'none', ''
+                ]
+                else '14:30:00' %}
+              {{
+                trigger.id == 'test_departed'
+                or now() < today_at(target_time)
+              }}
+        sequence:
+          - variables:
+              ev_soc: "{{ states('sensor.hems_effective_ev_soc') }}"
+              ev_target: "{{ states('sensor.hems_ev_target_today') }}"
+              ev_required: >-
+                {% set soc = states('sensor.hems_effective_ev_soc')
+                  | float(0) %}
+                {% set target = states('sensor.hems_ev_target_today')
+                  | float(0) %}
+                {{ ([((target - soc) / 100) * 60.4, 0] | max) | round(1) }}
+              target_time: >-
+                {% set configured = states(
+                  'input_datetime.hems_charging_target_time'
+                ) %}
+                {{ configured
+                  if configured not in [
+                    'unknown', 'unavailable', 'none', ''
+                  ]
+                  else '14:30:00' }}
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV return plan required
+              message: >-
+                The EV has left at {{ ev_soc }}%, below today's
+                {{ ev_target }}% target with approximately {{ ev_required }}
+                kWh remaining. Will it return for more charging before the
+                {{ target_time }} deadline? If returning, enter a time such as
+                13:30, 1:30 PM or 830am.
+              data:
+                tag: hems_ev_return_question
+                actions:
+                  - action: REPLY
+                    title: Returning - enter time
+                  - action: HEMS_EV_NOT_RETURNING
+                    title: Not returning today
+                  - action: HEMS_EV_DECIDE_LATER
+                    title: Decide later
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV return plan required
+              message: >-
+                The EV has left at {{ ev_soc }}%, below today's
+                {{ ev_target }}% target with approximately {{ ev_required }}
+                kWh remaining. Will it return for more charging before the
+                {{ target_time }} deadline? If returning, enter a time such as
+                13:30, 1:30 PM or 830am.
+              data:
+                tag: hems_ev_return_question
+                actions:
+                  - action: REPLY
+                    title: Returning - enter time
+                  - action: HEMS_EV_NOT_RETURNING
+                    title: Not returning today
+                  - action: HEMS_EV_DECIDE_LATER
+                    title: Decide later
+          - wait_for_trigger:
+              - trigger: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: REPLY
+                id: returning
+              - trigger: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: HEMS_EV_NOT_RETURNING
+                id: not_returning
+              - trigger: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: HEMS_EV_DECIDE_LATER
+                id: decide_later
+            timeout: "08:00:00"
+            continue_on_timeout: true
+          - variables:
+              selected_response: >-
+                {% if wait.trigger is not none %}
+                  {{ wait.trigger.id }}
+                {% else %}
+                  timed_out
+                {% endif %}
+              reply_text: >-
+                {% if wait.trigger is not none
+                    and wait.trigger.event is defined %}
+                  {{ wait.trigger.event.data.reply_text
+                    | default('', true) | trim }}
+                {% else %}
+                  {{ '' }}
+                {% endif %}
+              parsed_return_time: >-
+                {% set value = reply_text | trim | upper
+                  | replace(' ', '') | replace('.', ':') %}
+                {% set ns = namespace(parsed=none) %}
+                {% for format in [
+                  '%H:%M',
+                  '%H%M',
+                  '%I:%M%p',
+                  '%I%M%p',
+                  '%I%p'
+                ] %}
+                  {% if ns.parsed is none %}
+                    {% set ns.parsed = strptime(value, format, none) %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.parsed.strftime('%H:%M:%S')
+                  if ns.parsed is not none else '' }}
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_ev_return_question
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        selected_response | trim == 'returning'
+                        and parsed_return_time | trim != ''
+                      }}
+                sequence:
+                  - action: input_datetime.set_datetime
+                    target:
+                      entity_id: input_datetime.hems_ev_expected_return_time
+                    data:
+                      date: "{{ now().strftime('%Y-%m-%d') }}"
+                      time: "{{ parsed_return_time | trim }}"
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: input_boolean.ev_expected_back_today
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV return plan updated
+                      message: >-
+                        The EV is expected back today at
+                        {{ (parsed_return_time | trim)[0:5] }}. Its remaining
+                        shortfall stays in today's energy plan.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV return plan updated
+                      message: >-
+                        The EV is expected back today at
+                        {{ (parsed_return_time | trim)[0:5] }}. Its remaining
+                        shortfall stays in today's energy plan.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        selected_response | trim == 'returning'
+                        and parsed_return_time | trim == ''
+                      }}
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.ev_expected_back_today
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS could not read the return time
+                      message: >-
+                        The reply "{{ reply_text }}" was not recognised. The EV
+                        remains excluded from today's plan. Enter the helper
+                        manually and then enable EV Expected Back Today.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+                        actions:
+                          - action: URI
+                            title: Open return time
+                            uri: entityId:input_datetime.hems_ev_expected_return_time
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS could not read the return time
+                      message: >-
+                        The reply "{{ reply_text }}" was not recognised. The EV
+                        remains excluded from today's plan. Enter the helper
+                        manually and then enable EV Expected Back Today.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+                        actions:
+                          - action: URI
+                            title: Open return time
+                            uri: entityId:input_datetime.hems_ev_expected_return_time
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ selected_response | trim == 'not_returning' }}
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.ev_expected_back_today
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV plan updated
+                      message: >-
+                        The EV is not expected back today and has been excluded
+                        from today's remaining charging requirement.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV plan updated
+                      message: >-
+                        The EV is not expected back today and has been excluded
+                        from today's remaining charging requirement.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ selected_response | trim == 'decide_later' }}
+                sequence:
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV return decision deferred
+                      message: >-
+                        The current EV return-plan state has been retained. You
+                        can update EV Expected Back Today and its return time
+                        later.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS EV return decision deferred
+                      message: >-
+                        The current EV return-plan state has been retained. You
+                        can update EV Expected Back Today and its return time
+                        later.
+                      data:
+                        tag: hems_ev_return_plan_result
+                        alert_once: true
+            default: []
+mode: restart
+max_exceeded: silent

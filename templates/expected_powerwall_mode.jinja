@@ -1,0 +1,57 @@
+{% set soc_value =
+  states('sensor.hems_effective_powerwall')
+%}
+
+{% set target_value =
+  states('input_number.powerwall_target')
+%}
+
+{% set grid_required_value =
+  states('sensor.hems_effective_grid_energy_required')
+%}
+
+{% set import_price_value =
+  states('sensor.hems_effective_import_price')
+%}
+
+{% set effective_price_limit_value =
+  states('sensor.hems_effective_grid_charge_price_limit')
+%}
+
+{% if
+  not is_number(soc_value)
+  or not is_number(target_value)
+  or not is_number(grid_required_value)
+  or not is_number(import_price_value)
+  or not is_number(effective_price_limit_value)
+%}
+  hold
+{% else %}
+  {% set powerwall_percentage = soc_value | float %}
+  {% set powerwall_target = target_value | float %}
+  {% set grid_required = grid_required_value | float %}
+  {% set import_price = import_price_value | float %}
+  {% set effective_price_limit = effective_price_limit_value | float %}
+
+  {% set below_target =
+    powerwall_percentage < powerwall_target
+  %}
+
+  {% set daily_shortfall =
+    grid_required > 1
+  %}
+
+  {% set permitted_grid_available =
+    import_price <= effective_price_limit
+  %}
+
+  {% if
+    below_target
+    and daily_shortfall
+    and permitted_grid_available
+  %}
+    backup
+  {% else %}
+    self_consumption
+  {% endif %}
+{% endif %}

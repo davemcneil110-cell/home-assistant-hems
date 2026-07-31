@@ -1,0 +1,56 @@
+{% set invalid = ['unknown', 'unavailable', 'none', ''] %}
+{% set automatic = is_state('input_boolean.hems_solar_automatic_control_enabled', 'on') %}
+{% set manual_override = is_state('input_boolean.hems_solar_manual_override', 'on') %}
+{% set expected_raw = states('sensor.hems_solar_export_limit') %}
+{% set actual_raw = states('number.house_solaredge_se8250h_inverter_export_control_site_limit') %}
+{% set maximum_raw = states('input_number.maximum_solar_export') %}
+{% set ev_soc_raw = states('sensor.hems_effective_ev_soc') %}
+{% set limit_mode = states('select.house_solaredge_se8250h_inverter_export_control_limit_mode') %}
+{% set control_mode = states('select.house_solaredge_se8250h_inverter_export_control_mode') %}
+{% set ev_connected = is_state('binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on') %}
+{% set native_excess_enabled =
+  is_state('binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on')
+  and states('sensor.solaredge_ev_charger_ev_excess_solar_status') | lower == 'enabled'
+%}
+{% set native_ev_solar_opportunity =
+  ev_connected
+  and native_excess_enabled
+  and is_number(ev_soc_raw)
+  and (ev_soc_raw | float) < 99.5
+%}
+
+{% if manual_override %}
+  🟠 MANUAL OVERRIDE
+{% elif not automatic %}
+  ⚪ AUTOMATION DISABLED
+{% elif expected_raw | lower in invalid or actual_raw | lower in invalid or maximum_raw | lower in invalid %}
+  🔴 INPUT UNAVAILABLE
+{% elif limit_mode | lower in invalid or control_mode | lower in invalid %}
+  🔴 CONTROL STATUS UNAVAILABLE
+{% elif limit_mode != 'Total' %}
+  🔴 LIMIT MODE INCORRECT
+{% elif control_mode != 'Direct Export Limitation' %}
+  🔴 CONTROL MODE INCORRECT
+{% else %}
+  {% set expected = expected_raw | float %}
+  {% set actual = actual_raw | float %}
+  {% set maximum = maximum_raw | float %}
+  {% set coordinated = maximum if native_ev_solar_opportunity else expected %}
+  {% set seconds_held =
+    as_timestamp(now())
+    - as_timestamp(
+        states.number.house_solaredge_se8250h_inverter_export_control_site_limit.last_changed,
+        as_timestamp(now())
+      )
+  %}
+  {% set minutes_remaining = [((1800 - seconds_held) / 60) | round(0, 'ceil') | int, 0] | max %}
+  {% if (actual - coordinated) | abs <= 50 and native_ev_solar_opportunity %}
+    🟢 NATIVE EV SOLAR PRIORITY
+  {% elif (actual - coordinated) | abs <= 50 %}
+    🟢 HEALTHY
+  {% elif seconds_held < 1800 %}
+    🟡 DECISION HELD — {{ minutes_remaining }} MIN REMAINING
+  {% else %}
+    🟡 WAITING — EXPECTED {{ coordinated | round(0) | int }} W / ACTUAL {{ actual | round(0) | int }} W
+  {% endif %}
+{% endif %}

@@ -1,0 +1,296 @@
+alias: HEMS - Solar Worker
+description: >-
+  Sole SolarEdge export-limit worker. Native SolarEdge excess-solar EV charging
+  has priority whenever the EV is connected, native excess solar is enabled,
+  and EV SOC is below 100%. In that state the inverter remains at the configured
+  maximum export limit so the charger can absorb available solar beyond the
+  normal EV target. Every automatic export-limit decision is held for at least
+  30 minutes before an opposite decision is allowed. Disabling automatic solar
+  control or connecting an EV that can accept native excess solar releases
+  curtailment immediately. Manual override blocks all commands. Commands are
+  state-aware and notifications replace the previous Solar Worker notification.
+triggers:
+  - trigger: state
+    entity_id: sensor.hems_solar_export_limit
+
+  - trigger: state
+    entity_id:
+      - input_boolean.hems_solar_automatic_control_enabled
+      - input_boolean.hems_solar_manual_override
+
+  - trigger: state
+    entity_id:
+      - input_number.maximum_solar_export
+      - input_number.hems_solar_minimum_export_limit
+
+  - trigger: state
+    entity_id:
+      - binary_sensor.solaredge_ev_charger_ev_charger_connected
+      - binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled
+      - sensor.solaredge_ev_charger_ev_excess_solar_status
+      - sensor.hems_effective_ev_soc
+
+  - trigger: state
+    entity_id:
+      - select.house_solaredge_se8250h_inverter_export_control_limit_mode
+      - select.house_solaredge_se8250h_inverter_export_control_mode
+
+  - trigger: state
+    entity_id: number.house_solaredge_se8250h_inverter_export_control_site_limit
+    for: "00:01:00"
+
+  - trigger: time_pattern
+    minutes: "/5"
+
+  - trigger: homeassistant
+    event: start
+
+conditions: []
+
+actions:
+  - condition: state
+    entity_id: input_boolean.hems_solar_manual_override
+    state: "off"
+
+  - variables:
+      automatic_control_enabled: >-
+        {{ is_state('input_boolean.hems_solar_automatic_control_enabled', 'on') }}
+      expected_raw: >-
+        {{ states('sensor.hems_solar_export_limit') }}
+      maximum_raw: >-
+        {{ states('input_number.maximum_solar_export') }}
+      minimum_raw: >-
+        {{ states('input_number.hems_solar_minimum_export_limit') }}
+      actual_entity: >-
+        number.house_solaredge_se8250h_inverter_export_control_site_limit
+      actual_raw: >-
+        {{ states('number.house_solaredge_se8250h_inverter_export_control_site_limit') }}
+      limit_mode: >-
+        {{ states('select.house_solaredge_se8250h_inverter_export_control_limit_mode') }}
+      control_mode: >-
+        {{ states('select.house_solaredge_se8250h_inverter_export_control_mode') }}
+      ev_connected: >-
+        {{ is_state('binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on') }}
+      native_excess_enabled: >-
+        {{
+          is_state('binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on')
+          and states('sensor.solaredge_ev_charger_ev_excess_solar_status') | lower == 'enabled'
+        }}
+      ev_soc_raw: >-
+        {{ states('sensor.hems_effective_ev_soc') }}
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(maximum_raw)
+        and is_number(minimum_raw)
+        and is_number(actual_raw)
+      }}
+
+  - variables:
+      maximum_export: >-
+        {% set value = maximum_raw | float %}
+        {{ ([[value, 1] | max, 10000] | min) | round(0) }}
+      minimum_export: >-
+        {% set value = minimum_raw | float %}
+        {% set safe_value = [[value, 1] | max, 10000] | min %}
+        {{ ([safe_value, maximum_raw | float] | min) | round(0) }}
+      native_ev_solar_opportunity: >-
+        {{
+          ev_connected
+          and native_excess_enabled
+          and is_number(ev_soc_raw)
+          and (ev_soc_raw | float) < 99.5
+        }}
+      seconds_since_last_limit_change: >-
+        {{
+          as_timestamp(now())
+          - as_timestamp(
+              states.number.house_solaredge_se8250h_inverter_export_control_site_limit.last_changed,
+              as_timestamp(now())
+            )
+        }}
+
+  - variables:
+      requested_limit: >-
+        {% if is_number(expected_raw) %}
+          {% set requested = expected_raw | float %}
+          {% set above_minimum = [requested, minimum_export | float] | max %}
+          {{ ([above_minimum, maximum_export | float] | min) | round(0) }}
+        {% else %}
+          unavailable
+        {% endif %}
+      desired_limit: >-
+        {% if not automatic_control_enabled %}
+          {{ maximum_export | float }}
+        {% elif native_ev_solar_opportunity %}
+          {{ maximum_export | float }}
+        {% elif is_number(expected_raw) %}
+          {% set requested = expected_raw | float %}
+          {% set above_minimum = [requested, minimum_export | float] | max %}
+          {{ ([above_minimum, maximum_export | float] | min) | round(0) }}
+        {% else %}
+          unavailable
+        {% endif %}
+      decision_reason: >-
+        {% if not automatic_control_enabled %}
+          automatic control disabled — restore maximum
+        {% elif native_ev_solar_opportunity %}
+          native EV excess-solar opportunity — release maximum
+        {% elif is_number(expected_raw) and (expected_raw | float) < (maximum_export | float) - 50 %}
+          HEMS curtailment request
+        {% else %}
+          normal export limit
+        {% endif %}
+
+  - condition: template
+    value_template: "{{ is_number(desired_limit) }}"
+
+  - condition: template
+    value_template: >-
+      {{
+        not automatic_control_enabled
+        or (
+          limit_mode == 'Total'
+          and control_mode == 'Direct Export Limitation'
+        )
+      }}
+
+  - condition: template
+    value_template: >-
+      {{ ((actual_raw | float) - (desired_limit | float)) | abs >= 50 }}
+
+  - condition: template
+    value_template: >-
+      {{
+        not automatic_control_enabled
+        or native_ev_solar_opportunity
+        or (seconds_since_last_limit_change | float(0)) >= 1800
+      }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                automatic_control_enabled
+                and not native_ev_solar_opportunity
+                and (desired_limit | float) < (maximum_export | float) - 50
+              }}
+        sequence:
+          - delay: "00:01:00"
+
+          - condition: state
+            entity_id: input_boolean.hems_solar_manual_override
+            state: "off"
+
+          - condition: state
+            entity_id: input_boolean.hems_solar_automatic_control_enabled
+            state: "on"
+
+          - condition: template
+            value_template: >-
+              {{
+                is_state(
+                  'select.house_solaredge_se8250h_inverter_export_control_limit_mode',
+                  'Total'
+                )
+                and is_state(
+                  'select.house_solaredge_se8250h_inverter_export_control_mode',
+                  'Direct Export Limitation'
+                )
+              }}
+
+          - condition: template
+            value_template: >-
+              {% set connected = is_state(
+                'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                'on'
+              ) %}
+              {% set excess_enabled =
+                is_state(
+                  'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled',
+                  'on'
+                )
+                and states(
+                  'sensor.solaredge_ev_charger_ev_excess_solar_status'
+                ) | lower == 'enabled'
+              %}
+              {% set current_soc = states('sensor.hems_effective_ev_soc') %}
+              {{
+                not (
+                  connected
+                  and excess_enabled
+                  and is_number(current_soc)
+                  and (current_soc | float) < 99.5
+                )
+              }}
+
+          - condition: template
+            value_template: >-
+              {% set current_request = states('sensor.hems_solar_export_limit') %}
+              {% if is_number(current_request) %}
+                {% set requested = current_request | float %}
+                {% set above_minimum = [requested, minimum_export | float] | max %}
+                {% set rechecked_limit = [above_minimum, maximum_export | float] | min %}
+                {{
+                  (rechecked_limit - (desired_limit | float)) | abs < 1
+                  and rechecked_limit < (maximum_export | float) - 50
+                }}
+              {% else %}
+                false
+              {% endif %}
+
+  - condition: state
+    entity_id: input_boolean.hems_solar_manual_override
+    state: "off"
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states(
+          'number.house_solaredge_se8250h_inverter_export_control_site_limit'
+        ))
+        and (
+          (
+            states(
+              'number.house_solaredge_se8250h_inverter_export_control_site_limit'
+            ) | float
+          )
+          - (desired_limit | float)
+        ) | abs >= 50
+      }}
+
+  - action: number.set_value
+    target:
+      entity_id: number.house_solaredge_se8250h_inverter_export_control_site_limit
+    data:
+      value: "{{ desired_limit | float }}"
+
+  - wait_template: >-
+      {% set current = states(
+        'number.house_solaredge_se8250h_inverter_export_control_site_limit'
+      ) %}
+      {{
+        is_number(current)
+        and (((current | float) - (desired_limit | float)) | abs < 50)
+      }}
+    timeout: "00:00:30"
+    continue_on_timeout: false
+
+  - action: notify.mobile_app_primary_phone
+    data:
+      title: "HEMS Solar export limit confirmed"
+      message: >-
+        SolarEdge export limit is now {{ states(
+          'number.house_solaredge_se8250h_inverter_export_control_site_limit'
+        ) | float | round(0) | int }} W. Reason: {{ decision_reason }}.
+        This decision will be held for at least 30 minutes unless automatic
+        control is disabled or a native EV excess-solar opportunity appears.
+      data:
+        tag: hems_solar_export_limit
+        group: hems_solar
+        alert_once: true
+
+mode: single
+max_exceeded: silent

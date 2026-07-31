@@ -1,0 +1,83 @@
+{% set expected = states('sensor.hems_expected_ev_action') %}
+{% set charging_raw = states(
+  'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+) %}
+{% set charging = charging_raw == 'on' %}
+
+{% if expected == 'MANUAL_OVERRIDE' %}
+  MANUAL_OVERRIDE
+
+{% elif expected == 'AUTOMATION_DISABLED' %}
+  AUTOMATION_DISABLED
+
+{% elif expected == 'TEST_CONFLICT' %}
+  TEST_CONFLICT
+
+{% elif expected in [
+    'INPUT_UNAVAILABLE',
+    'CHARGER_STATE_UNAVAILABLE',
+    'CHARGER_MODE_UNAVAILABLE'
+  ] %}
+  INPUT_UNAVAILABLE
+
+{% elif charging_raw not in ['on', 'off'] %}
+  INPUT_UNAVAILABLE
+
+{% elif expected.startswith('START_') %}
+  {% if charging %}
+    HEALTHY_CHARGING
+  {% else %}
+    ACTION_PENDING_START
+  {% endif %}
+
+{% elif expected.startswith('CONTINUE_') %}
+  {% if charging %}
+    HEALTHY_CHARGING
+  {% else %}
+    ACTION_REQUIRED_RESTART
+  {% endif %}
+
+{% elif expected.startswith('STOP_') %}
+  {% if charging %}
+    ACTION_PENDING_STOP
+  {% else %}
+    HEALTHY_STOPPED
+  {% endif %}
+
+{% elif expected == 'NATIVE_EXCESS_SOLAR_CONTROL_REQUIRED' %}
+  ATTENTION_NATIVE_EXCESS_SOLAR_MODE
+
+{% elif expected == 'WAIT_NATIVE_EXCESS_SOLAR' %}
+  HEALTHY_WAITING_NATIVE_SOLAR
+
+{% elif expected == 'TARGET_MET' %}
+  {% if charging %}
+    UNEXPECTED_CHARGING
+  {% else %}
+    HEALTHY_TARGET_MET
+  {% endif %}
+
+{% elif expected == 'WAIT_RECOVERY_APPROVAL' %}
+  {% if charging %}
+    UNEXPECTED_CHARGING
+  {% else %}
+    HEALTHY_WAITING_APPROVAL
+  {% endif %}
+
+{% elif expected == 'WAIT_SOLAR_OR_CHEAP_GRID' %}
+  {% if charging %}
+    UNEXPECTED_CHARGING
+  {% else %}
+    HEALTHY_WAITING_ENERGY
+  {% endif %}
+
+{% elif expected == 'EV_UNAVAILABLE' %}
+  {% if charging %}
+    UNEXPECTED_CHARGING
+  {% else %}
+    HEALTHY_EV_UNAVAILABLE
+  {% endif %}
+
+{% else %}
+  UNKNOWN_EXPECTED_ACTION
+{% endif %}

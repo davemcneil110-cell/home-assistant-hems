@@ -1,0 +1,14 @@
+{% set capacity_kwh = 60.4 %}
+{% set soc_raw = states('sensor.hems_effective_ev_soc') %}
+{% set target_raw = states('sensor.hems_ev_target_today') %}
+{% set availability = states('sensor.ev_charging_availability') %}
+
+{% if is_number(soc_raw)
+      and is_number(target_raw)
+      and availability in ['READY', 'CHARGING'] %}
+  {% set soc = soc_raw | float %}
+  {% set target = target_raw | float %}
+  {{ ([((target - soc) / 100) * capacity_kwh, 0] | max) | round(1) }}
+{% else %}
+  0
+{% endif %}

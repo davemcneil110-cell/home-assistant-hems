@@ -1,0 +1,153 @@
+alias: HEMS - Financial Worker
+description: >-
+  Sole HEMS financial ledger. Tracks real grid import cost and signed export
+  value from cumulative Teslemetry daily energy and live Amber prices. It
+  validates every source, prevents backwards meter corrections from being
+  recounted, saves energy baselines before monetary results, and performs its
+  own date-aware daily reset. Test overrides are intentionally excluded so a
+  HEMS test cannot alter the real financial ledger.
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.house_home_energy_gateway_teslemetry_grid_imported_today
+      - sensor.house_home_energy_gateway_teslemetry_grid_exported_today
+
+  - trigger: time_pattern
+    minutes: "/5"
+    seconds: "20"
+
+  - trigger: homeassistant
+    event: start
+
+conditions: []
+
+actions:
+  - variables:
+      import_total_raw: >-
+        {{ states('sensor.house_home_energy_gateway_teslemetry_grid_imported_today') }}
+      export_total_raw: >-
+        {{ states('sensor.house_home_energy_gateway_teslemetry_grid_exported_today') }}
+      import_price_raw: >-
+        {{ states('sensor.amber_general_price') }}
+      export_price_raw: >-
+        {{ states('sensor.amber_feed_in_price') }}
+      last_import_raw: >-
+        {{ states('input_number.hems_last_grid_import') }}
+      last_export_raw: >-
+        {{ states('input_number.hems_last_grid_export') }}
+      import_cost_raw: >-
+        {{ states('input_number.hems_import_cost_today') }}
+      export_credit_raw: >-
+        {{ states('input_number.hems_export_credit_today') }}
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(import_total_raw)
+        and is_number(export_total_raw)
+        and is_number(import_price_raw)
+        and is_number(export_price_raw)
+        and is_number(last_import_raw)
+        and is_number(last_export_raw)
+        and is_number(import_cost_raw)
+        and is_number(export_credit_raw)
+      }}
+
+  - variables:
+      import_total: "{{ import_total_raw | float }}"
+      export_total: "{{ export_total_raw | float }}"
+      import_price: "{{ import_price_raw | float }}"
+      export_price: "{{ export_price_raw | float }}"
+      last_import: "{{ last_import_raw | float }}"
+      last_export: "{{ last_export_raw | float }}"
+      import_cost_today: "{{ import_cost_raw | float }}"
+      export_credit_today: "{{ export_credit_raw | float }}"
+      today_key: "{{ now().date() | string }}"
+      stored_date: "{{ states('input_text.hems_financial_date') }}"
+      new_financial_day: "{{ stored_date != today_key }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ new_financial_day }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id:
+                - input_number.hems_import_cost_today
+                - input_number.hems_export_credit_today
+                - input_number.hems_net_cost_today
+            data:
+              value: 0
+
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hems_last_grid_import
+            data:
+              value: "{{ import_total | round(5) }}"
+
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hems_last_grid_export
+            data:
+              value: "{{ export_total | round(5) }}"
+
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.hems_financial_date
+            data:
+              value: "{{ today_key }}"
+
+    default:
+      - variables:
+          import_delta: >-
+            {{ [import_total - last_import, 0] | max }}
+          export_delta: >-
+            {{ [export_total - last_export, 0] | max }}
+          next_import_baseline: >-
+            {{ [last_import, import_total] | max }}
+          next_export_baseline: >-
+            {{ [last_export, export_total] | max }}
+          next_import_cost: >-
+            {{ import_cost_today + (import_delta * import_price) }}
+          next_export_credit: >-
+            {{ export_credit_today + (export_delta * export_price) }}
+          next_net_cost: >-
+            {{
+              (import_cost_today + (import_delta * import_price))
+              - (export_credit_today + (export_delta * export_price))
+            }}
+
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_last_grid_import
+        data:
+          value: "{{ next_import_baseline | round(5) }}"
+
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_last_grid_export
+        data:
+          value: "{{ next_export_baseline | round(5) }}"
+
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_import_cost_today
+        data:
+          value: "{{ next_import_cost | round(4) }}"
+
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_export_credit_today
+        data:
+          value: "{{ next_export_credit | round(4) }}"
+
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_net_cost_today
+        data:
+          value: "{{ next_net_cost | round(4) }}"
+
+mode: queued
+max: 10
+max_exceeded: silent

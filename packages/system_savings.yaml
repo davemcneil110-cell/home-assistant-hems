@@ -1,0 +1,425 @@
+# HEMS System Savings Package
+#
+# Purpose:
+# - Starts with conservative historical estimates from July 2023:
+#     Solar:     33,900 kWh x $0.03/kWh = $1,017 AUD
+#     Powerwall:  8,900 kWh x $0.20/kWh = $1,780 AUD
+# - Adds live asset-attributed value from the new energy-routing sensors.
+# - Uses the real Amber entities, not HEMS effective/test price sensors.
+#
+# Accounting model:
+# - Solar supplied to Home, EV or Powerwall is valued at live import price.
+# - Solar exported is valued at live feed-in price. Negative feed-in is a cost.
+# - Powerwall supplied to Home or EV is valued at live import price.
+# - Grid energy used to charge the Powerwall is deducted from Powerwall value.
+# - Grid supplied directly to Home or EV is never counted as a saving.
+#
+# The combined result is an asset-attributed benefit, not an audited bill total.
+# Solar stored in the Powerwall is attributed to Solar when captured and the
+# later avoided import is attributed to the Powerwall when discharged.
+
+input_number:
+  hems_solar_historical_lifetime_energy:
+    name: HEMS Solar Historical Lifetime Energy
+    icon: mdi:solar-power
+    min: 0
+    max: 100000
+    step: 100
+    initial: 33900
+    mode: box
+    unit_of_measurement: kWh
+
+  hems_solar_historical_average_value:
+    name: HEMS Solar Historical Average Value
+    icon: mdi:cash
+    min: 0
+    max: 2
+    step: 0.01
+    initial: 0.03
+    mode: box
+    unit_of_measurement: AUD/kWh
+
+  hems_powerwall_historical_discharge_energy:
+    name: HEMS Powerwall Historical Discharge Energy
+    icon: mdi:home-battery
+    min: 0
+    max: 100000
+    step: 100
+    initial: 8900
+    mode: box
+    unit_of_measurement: kWh
+
+  hems_powerwall_historical_average_value:
+    name: HEMS Powerwall Historical Average Value
+    icon: mdi:cash
+    min: 0
+    max: 2
+    step: 0.01
+    initial: 0.20
+    mode: box
+    unit_of_measurement: AUD/kWh
+
+input_select:
+  hems_savings_timescale:
+    name: HEMS Savings Timescale
+    icon: mdi:calendar-range
+    options:
+      - Today
+      - This Week
+      - This Month
+      - This Year
+      - Lifetime
+    initial: Today
+
+template:
+  - sensor:
+      - name: HEMS Savings Live Import Price
+        unique_id: hems_savings_live_import_price
+        icon: mdi:transmission-tower-import
+        unit_of_measurement: AUD/kWh
+        state_class: measurement
+        state: >-
+          {% set raw = states('sensor.amber_general_price') %}
+          {% if raw not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ [raw | float(0), 0] | max | round(4) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: HEMS Savings Live Feed In Price
+        unique_id: hems_savings_live_feed_in_price
+        icon: mdi:transmission-tower-export
+        unit_of_measurement: AUD/kWh
+        state_class: measurement
+        state: >-
+          {% set raw = states('sensor.amber_feed_in_price') %}
+          {% if raw not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ raw | float(0) | round(4) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: HEMS Solar Avoided Import Savings Rate
+        unique_id: hems_solar_avoided_import_savings_rate
+        icon: mdi:solar-power
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set home = states('sensor.hems_solar_to_home_power') | float(0) %}
+          {% set ev = states('sensor.hems_solar_to_ev_power') | float(0) %}
+          {% set battery = states('sensor.hems_solar_to_powerwall_power') | float(0) %}
+          {% set price = states('sensor.hems_savings_live_import_price') | float(0) %}
+          {{ (([home + ev + battery, 0] | max) * price) | round(5) }}
+        attributes:
+          solar_to_home_kw: "{{ states('sensor.hems_solar_to_home_power') | float(0) | round(3) }}"
+          solar_to_ev_kw: "{{ states('sensor.hems_solar_to_ev_power') | float(0) | round(3) }}"
+          solar_to_powerwall_kw: "{{ states('sensor.hems_solar_to_powerwall_power') | float(0) | round(3) }}"
+
+      - name: HEMS Solar Export Revenue Rate
+        unique_id: hems_solar_export_revenue_rate
+        icon: mdi:cash-plus
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set export = states('sensor.hems_solar_to_grid_power') | float(0) %}
+          {% set price = states('sensor.hems_savings_live_feed_in_price') | float(0) %}
+          {{ (([export, 0] | max) * ([price, 0] | max)) | round(5) }}
+
+      - name: HEMS Solar Negative Export Cost Rate
+        unique_id: hems_solar_negative_export_cost_rate
+        icon: mdi:cash-minus
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set export = states('sensor.hems_solar_to_grid_power') | float(0) %}
+          {% set price = states('sensor.hems_savings_live_feed_in_price') | float(0) %}
+          {{ (([export, 0] | max) * ([0 - price, 0] | max)) | round(5) }}
+
+      - name: HEMS Powerwall Avoided Import Savings Rate
+        unique_id: hems_powerwall_avoided_import_savings_rate
+        icon: mdi:home-battery
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set home = states('sensor.hems_powerwall_to_home_power') | float(0) %}
+          {% set ev = states('sensor.hems_powerwall_to_ev_power') | float(0) %}
+          {% set price = states('sensor.hems_savings_live_import_price') | float(0) %}
+          {{ (([home + ev, 0] | max) * price) | round(5) }}
+        attributes:
+          powerwall_to_home_kw: "{{ states('sensor.hems_powerwall_to_home_power') | float(0) | round(3) }}"
+          powerwall_to_ev_kw: "{{ states('sensor.hems_powerwall_to_ev_power') | float(0) | round(3) }}"
+
+      - name: HEMS Powerwall Grid Charge Cost Rate
+        unique_id: hems_powerwall_grid_charge_cost_rate
+        icon: mdi:battery-minus
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set power = states('sensor.hems_grid_to_powerwall_power') | float(0) %}
+          {% set price = states('sensor.hems_savings_live_import_price') | float(0) %}
+          {{ (([power, 0] | max) * price) | round(5) }}
+
+      - name: HEMS Solar Live Net Savings Rate
+        unique_id: hems_solar_live_net_savings_rate
+        icon: mdi:solar-power-variant
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set avoided = states('sensor.hems_solar_avoided_import_savings_rate') | float(0) %}
+          {% set revenue = states('sensor.hems_solar_export_revenue_rate') | float(0) %}
+          {% set cost = states('sensor.hems_solar_negative_export_cost_rate') | float(0) %}
+          {{ (avoided + revenue - cost) | round(5) }}
+
+      - name: HEMS Powerwall Live Net Savings Rate
+        unique_id: hems_powerwall_live_net_savings_rate
+        icon: mdi:home-battery
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set avoided = states('sensor.hems_powerwall_avoided_import_savings_rate') | float(0) %}
+          {% set cost = states('sensor.hems_powerwall_grid_charge_cost_rate') | float(0) %}
+          {{ (avoided - cost) | round(5) }}
+
+      - name: HEMS Combined Live Net Savings Rate
+        unique_id: hems_combined_live_net_savings_rate
+        icon: mdi:cash-multiple
+        unit_of_measurement: AUD/h
+        state_class: measurement
+        state: >-
+          {% set solar = states('sensor.hems_solar_live_net_savings_rate') | float(0) %}
+          {% set battery = states('sensor.hems_powerwall_live_net_savings_rate') | float(0) %}
+          {{ (solar + battery) | round(5) }}
+
+      - name: HEMS Solar Historical Savings Baseline
+        unique_id: hems_solar_historical_savings_baseline
+        icon: mdi:solar-power
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set energy = states('input_number.hems_solar_historical_lifetime_energy') | float(0) %}
+          {% set value = states('input_number.hems_solar_historical_average_value') | float(0) %}
+          {{ (energy * value) | round(2) }}
+
+      - name: HEMS Powerwall Historical Savings Baseline
+        unique_id: hems_powerwall_historical_savings_baseline
+        icon: mdi:home-battery
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set energy = states('input_number.hems_powerwall_historical_discharge_energy') | float(0) %}
+          {% set value = states('input_number.hems_powerwall_historical_average_value') | float(0) %}
+          {{ (energy * value) | round(2) }}
+
+      - name: HEMS Solar Savings Since Tracking
+        unique_id: hems_solar_savings_since_tracking
+        icon: mdi:solar-power-variant
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set avoided = states('sensor.hems_solar_avoided_import_value_since_tracking') | float(0) %}
+          {% set revenue = states('sensor.hems_solar_export_revenue_since_tracking') | float(0) %}
+          {% set cost = states('sensor.hems_solar_negative_export_cost_since_tracking') | float(0) %}
+          {{ (avoided + revenue - cost) | round(4) }}
+
+      - name: HEMS Powerwall Savings Since Tracking
+        unique_id: hems_powerwall_savings_since_tracking
+        icon: mdi:home-battery
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set avoided = states('sensor.hems_powerwall_avoided_import_value_since_tracking') | float(0) %}
+          {% set cost = states('sensor.hems_powerwall_grid_charge_cost_since_tracking') | float(0) %}
+          {{ (avoided - cost) | round(4) }}
+
+      - name: HEMS Solar Lifetime Estimated Savings
+        unique_id: hems_solar_lifetime_estimated_savings
+        icon: mdi:solar-power
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set baseline = states('sensor.hems_solar_historical_savings_baseline') | float(0) %}
+          {% set tracked = states('sensor.hems_solar_savings_since_tracking') | float(0) %}
+          {{ (baseline + tracked) | round(2) }}
+
+      - name: HEMS Powerwall Lifetime Estimated Savings
+        unique_id: hems_powerwall_lifetime_estimated_savings
+        icon: mdi:home-battery
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set baseline = states('sensor.hems_powerwall_historical_savings_baseline') | float(0) %}
+          {% set tracked = states('sensor.hems_powerwall_savings_since_tracking') | float(0) %}
+          {{ (baseline + tracked) | round(2) }}
+
+      - name: HEMS Combined Lifetime Estimated Savings
+        unique_id: hems_combined_lifetime_estimated_savings
+        icon: mdi:cash-multiple
+        device_class: monetary
+        unit_of_measurement: AUD
+        state_class: total
+        state: >-
+          {% set solar = states('sensor.hems_solar_lifetime_estimated_savings') | float(0) %}
+          {% set battery = states('sensor.hems_powerwall_lifetime_estimated_savings') | float(0) %}
+          {{ (solar + battery) | round(2) }}
+
+      - name: HEMS Solar Savings Selected Period
+        unique_id: hems_solar_savings_selected_period
+        icon: mdi:solar-power
+        device_class: monetary
+        unit_of_measurement: AUD
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_solar_savings_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_solar_savings_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_solar_savings_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_solar_savings_this_year') | float(0) | round(2) }}
+          {% else %}
+            {{ states('sensor.hems_solar_lifetime_estimated_savings') | float(0) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Powerwall Savings Selected Period
+        unique_id: hems_powerwall_savings_selected_period
+        icon: mdi:home-battery
+        device_class: monetary
+        unit_of_measurement: AUD
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_powerwall_savings_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_powerwall_savings_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_powerwall_savings_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_powerwall_savings_this_year') | float(0) | round(2) }}
+          {% else %}
+            {{ states('sensor.hems_powerwall_lifetime_estimated_savings') | float(0) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Total Savings Selected Period
+        unique_id: hems_total_savings_selected_period
+        icon: mdi:cash-multiple
+        device_class: monetary
+        unit_of_measurement: AUD
+        state: >-
+          {% set solar = states('sensor.hems_solar_savings_selected_period') | float(0) %}
+          {% set battery = states('sensor.hems_powerwall_savings_selected_period') | float(0) %}
+          {{ (solar + battery) | round(2) }}
+
+sensor:
+  - platform: integration
+    source: sensor.hems_solar_avoided_import_savings_rate
+    name: HEMS Solar Avoided Import Value Since Tracking
+    unique_id: hems_solar_avoided_import_value_since_tracking
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_solar_export_revenue_rate
+    name: HEMS Solar Export Revenue Since Tracking
+    unique_id: hems_solar_export_revenue_since_tracking
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_solar_negative_export_cost_rate
+    name: HEMS Solar Negative Export Cost Since Tracking
+    unique_id: hems_solar_negative_export_cost_since_tracking
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_powerwall_avoided_import_savings_rate
+    name: HEMS Powerwall Avoided Import Value Since Tracking
+    unique_id: hems_powerwall_avoided_import_value_since_tracking
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.hems_powerwall_grid_charge_cost_rate
+    name: HEMS Powerwall Grid Charge Cost Since Tracking
+    unique_id: hems_powerwall_grid_charge_cost_since_tracking
+    unit_time: h
+    method: left
+    round: 4
+    max_sub_interval:
+      minutes: 5
+
+utility_meter:
+  hems_solar_savings_today:
+    name: HEMS Solar Savings Today
+    source: sensor.hems_solar_savings_since_tracking
+    cycle: daily
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_solar_savings_this_week:
+    name: HEMS Solar Savings This Week
+    source: sensor.hems_solar_savings_since_tracking
+    cycle: weekly
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_solar_savings_this_month:
+    name: HEMS Solar Savings This Month
+    source: sensor.hems_solar_savings_since_tracking
+    cycle: monthly
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_solar_savings_this_year:
+    name: HEMS Solar Savings This Year
+    source: sensor.hems_solar_savings_since_tracking
+    cycle: yearly
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_powerwall_savings_today:
+    name: HEMS Powerwall Savings Today
+    source: sensor.hems_powerwall_savings_since_tracking
+    cycle: daily
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_powerwall_savings_this_week:
+    name: HEMS Powerwall Savings This Week
+    source: sensor.hems_powerwall_savings_since_tracking
+    cycle: weekly
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_powerwall_savings_this_month:
+    name: HEMS Powerwall Savings This Month
+    source: sensor.hems_powerwall_savings_since_tracking
+    cycle: monthly
+    net_consumption: true
+    periodically_resetting: false
+
+  hems_powerwall_savings_this_year:
+    name: HEMS Powerwall Savings This Year
+    source: sensor.hems_powerwall_savings_since_tracking
+    cycle: yearly
+    net_consumption: true
+    periodically_resetting: false

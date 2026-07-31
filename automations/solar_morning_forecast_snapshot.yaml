@@ -1,0 +1,79 @@
+alias: HEMS - Solar Morning Forecast Snapshot
+description: >-
+  Records the Solcast central and conservative daily forecasts once during the
+  morning planning window. The date is written last so a failed partial update
+  can retry. This automation is data-only and controls no hardware.
+
+triggers:
+  - trigger: time
+    at: "08:00:00"
+
+  - trigger: state
+    entity_id: sensor.solcast_pv_forecast_forecast_today
+
+  - trigger: homeassistant
+    event: start
+
+conditions:
+  - condition: time
+    after: "07:54:59"
+    before: "08:30:01"
+
+  - condition: template
+    value_template: >-
+      {{
+        states('input_text.hems_solar_morning_forecast_date')
+        != now().strftime('%Y-%m-%d')
+      }}
+
+  - condition: template
+    value_template: >-
+      {{
+        is_number(states('sensor.solcast_pv_forecast_forecast_today'))
+        and is_number(state_attr(
+          'sensor.solcast_pv_forecast_forecast_today',
+          'estimate10'
+        ))
+      }}
+
+actions:
+  - variables:
+      central_forecast: >-
+        {{
+          states('sensor.solcast_pv_forecast_forecast_today')
+          | float
+          | round(1)
+        }}
+
+      conservative_forecast: >-
+        {{
+          state_attr(
+            'sensor.solcast_pv_forecast_forecast_today',
+            'estimate10'
+          )
+          | float
+          | round(1)
+        }}
+
+      snapshot_date: "{{ now().strftime('%Y-%m-%d') }}"
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_solar_morning_forecast_central
+    data:
+      value: "{{ central_forecast }}"
+
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hems_solar_morning_forecast_conservative
+    data:
+      value: "{{ conservative_forecast }}"
+
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.hems_solar_morning_forecast_date
+    data:
+      value: "{{ snapshot_date }}"
+
+mode: single
+max_exceeded: silent

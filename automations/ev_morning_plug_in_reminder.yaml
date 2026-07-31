@@ -1,0 +1,118 @@
+alias: BYD Atto 3 - Morning Plug-in Reminder
+description: >-
+  Sends primary user and secondary EV user one reminder when the EV is home, unplugged and below
+  today's target during the morning charging window. Connection clears the
+  notification. This automation only sends notifications and updates the
+  reminder helper; it never controls the EV charger, vehicle or Powerwall.
+triggers:
+  - trigger: time
+    at: "00:05:00"
+    id: daily_reset
+  - trigger: time_pattern
+    minutes: "0"
+    id: morning_check
+  - trigger: state
+    entity_id: binary_sensor.solaredge_ev_charger_ev_charger_connected
+    to: "on"
+    id: charger_connected
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'daily_reset' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.byd_morning_reminder_sent
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_byd_plug_in_reminder
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_byd_plug_in_reminder
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'charger_connected' }}"
+        sequence:
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_byd_plug_in_reminder
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              message: clear_notification
+              data:
+                tag: hems_byd_plug_in_reminder
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'morning_check' }}"
+          - condition: time
+            after: "07:59:59"
+            before: "12:00:01"
+          - condition: state
+            entity_id: input_boolean.byd_morning_reminder_sent
+            state: "off"
+          - condition: state
+            entity_id: device_tracker.atto_3_location
+            state: home
+          - condition: state
+            entity_id: binary_sensor.solaredge_ev_charger_ev_charger_connected
+            state: "off"
+          - condition: state
+            entity_id: input_boolean.hems_test_ev_away
+            state: "off"
+          - condition: state
+            entity_id: input_boolean.hems_test_ev_home_plugged_low_soc
+            state: "off"
+          - condition: template
+            value_template: >-
+              {% set soc = states('sensor.hems_effective_ev_soc') %}
+              {% set target = states('sensor.hems_ev_target_today') %}
+              {{ is_number(soc) and is_number(target)
+                 and (soc | float) < (target | float) }}
+        sequence:
+          - variables:
+              ev_soc: "{{ states('sensor.hems_effective_ev_soc') | float(0) | round(0) | int }}"
+              ev_target: "{{ states('sensor.hems_ev_target_today') | float(80) | round(0) | int }}"
+              target_time: >-
+                {% set value = states('input_datetime.hems_charging_target_time') %}
+                {{ value if value not in ['unknown', 'unavailable', 'none', '']
+                   else '14:30:00' }}
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV plug-in reminder
+              message: >-
+                The BYD Atto 3 is home and unplugged at {{ ev_soc }}%.
+                Today's target is {{ ev_target }}% by {{ target_time }}.
+                Plug it in so HEMS can plan excess-solar or cheap-grid charging.
+              data:
+                tag: hems_byd_plug_in_reminder
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV plug-in reminder
+              message: >-
+                The BYD Atto 3 is home and unplugged at {{ ev_soc }}%.
+                Today's target is {{ ev_target }}% by {{ target_time }}.
+                Plug it in so HEMS can plan excess-solar or cheap-grid charging.
+              data:
+                tag: hems_byd_plug_in_reminder
+                alert_once: true
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.byd_morning_reminder_sent
+mode: single

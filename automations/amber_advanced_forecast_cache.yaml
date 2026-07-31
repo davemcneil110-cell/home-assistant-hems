@@ -1,0 +1,273 @@
+alias: HEMS - Amber Advanced Forecast Cache
+description: >-
+  Fetches Amber's General-channel forecast and caches the Advanced predicted
+  price aggregates needed by HEMS. Uses per_kwh only for an interval where an
+  Advanced predicted price is unavailable. This automation stores no API key
+  and controls no hardware.
+
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+
+  - trigger: homeassistant
+    event: start
+
+  - trigger: state
+    entity_id:
+      - input_datetime.hems_charging_target_time
+      - sensor.hems_effective_grid_charge_price_limit
+
+conditions: []
+
+actions:
+  - action: amberelectric.get_forecasts
+    data:
+      config_entry_id: 01KW40NV0005JKQEP4P7BYEJSZ
+      channel_type: general
+    response_variable: amber_response
+
+  - variables:
+      forecasts: >-
+        {{ amber_response.forecasts | default([], true) }}
+
+      target_time_raw: >-
+        {{ states('input_datetime.hems_charging_target_time') }}
+
+      target_time: >-
+        {% if target_time_raw not in [
+            'unknown', 'unavailable', 'none', ''
+          ] %}
+          {{ target_time_raw }}
+        {% else %}
+          14:30:00
+        {% endif %}
+
+  - variables:
+      deadline: >-
+        {{ today_at(target_time) }}
+
+      usable_count: >-
+        {% set ns = namespace(count=0) %}
+        {% for item in forecasts %}
+          {% set start = as_datetime(
+              item.start_time,
+              none
+            ) if item.start_time is defined else none %}
+          {% set end = as_datetime(
+              item.end_time,
+              none
+            ) if item.end_time is defined else none %}
+          {% set price = item.advanced_price_predicted
+              if item.advanced_price_predicted is defined
+                  and is_number(item.advanced_price_predicted)
+              else item.per_kwh
+              if item.per_kwh is defined
+                  and is_number(item.per_kwh)
+              else none %}
+          {% if start is not none
+                and end is not none
+                and price is not none
+                and end > now()
+                and start < as_datetime(deadline) %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.count }}
+
+      advanced_count: >-
+        {% set ns = namespace(count=0) %}
+        {% for item in forecasts %}
+          {% set start = as_datetime(
+              item.start_time,
+              none
+            ) if item.start_time is defined else none %}
+          {% set end = as_datetime(
+              item.end_time,
+              none
+            ) if item.end_time is defined else none %}
+          {% if start is not none
+                and end is not none
+                and item.advanced_price_predicted is defined
+                and is_number(item.advanced_price_predicted)
+                and end > now()
+                and start < as_datetime(deadline) %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.count }}
+
+      cheapest_value: >-
+        {% set ns = namespace(value=none) %}
+        {% for item in forecasts %}
+          {% set start = as_datetime(
+              item.start_time,
+              none
+            ) if item.start_time is defined else none %}
+          {% set end = as_datetime(
+              item.end_time,
+              none
+            ) if item.end_time is defined else none %}
+          {% set price = item.advanced_price_predicted
+              if item.advanced_price_predicted is defined
+                  and is_number(item.advanced_price_predicted)
+              else item.per_kwh
+              if item.per_kwh is defined
+                  and is_number(item.per_kwh)
+              else none %}
+          {% if start is not none
+                and end is not none
+                and price is not none
+                and end > now()
+                and start < as_datetime(deadline) %}
+            {% set numeric_price = price | float %}
+            {% if ns.value is none or numeric_price < ns.value %}
+              {% set ns.value = numeric_price %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.value if ns.value is not none else 0 }}
+
+      cheap_minutes_value: >-
+        {% set limit = states(
+            'sensor.hems_effective_grid_charge_price_limit'
+          ) %}
+        {% set ns = namespace(minutes=0) %}
+        {% if is_number(limit) %}
+          {% for item in forecasts %}
+            {% set start = as_datetime(
+                item.start_time,
+                none
+              ) if item.start_time is defined else none %}
+            {% set end = as_datetime(
+                item.end_time,
+                none
+              ) if item.end_time is defined else none %}
+            {% set price = item.advanced_price_predicted
+                if item.advanced_price_predicted is defined
+                    and is_number(item.advanced_price_predicted)
+                else item.per_kwh
+                if item.per_kwh is defined
+                    and is_number(item.per_kwh)
+                else none %}
+            {% if start is not none
+                  and end is not none
+                  and price is not none
+                  and end > now()
+                  and start < as_datetime(deadline)
+                  and (price | float) <= (limit | float) %}
+              {% set usable_start = [
+                  as_timestamp(start),
+                  as_timestamp(now())
+                ] | max %}
+              {% set usable_end = [
+                  as_timestamp(end),
+                  as_timestamp(as_datetime(deadline))
+                ] | min %}
+              {% set interval_minutes = ([
+                  usable_end - usable_start,
+                  0
+                ] | max) / 60 %}
+              {% set ns.minutes = ns.minutes + interval_minutes %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {{ ns.minutes | round(0) | int }}
+
+      latest_end_value: >-
+        {% set ns = namespace(value=none) %}
+        {% for item in forecasts %}
+          {% set start = as_datetime(
+              item.start_time,
+              none
+            ) if item.start_time is defined else none %}
+          {% set end = as_datetime(
+              item.end_time,
+              none
+            ) if item.end_time is defined else none %}
+          {% set price = item.advanced_price_predicted
+              if item.advanced_price_predicted is defined
+                  and is_number(item.advanced_price_predicted)
+              else item.per_kwh
+              if item.per_kwh is defined
+                  and is_number(item.per_kwh)
+              else none %}
+          {% if start is not none
+                and end is not none
+                and price is not none
+                and end > now()
+                and start < as_datetime(deadline)
+                and (ns.value is none or end > ns.value) %}
+            {% set ns.value = end %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.value if ns.value is not none else '' }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ usable_count | int(0) > 0 }}
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hems_advanced_cheapest_visible_import_price
+            data:
+              value: >-
+                {{ cheapest_value | float }}
+
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hems_advanced_cheap_grid_minutes_before_target
+            data:
+              value: >-
+                {{ cheap_minutes_value | int }}
+
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_advanced_forecast_latest_end
+            data:
+              datetime: >-
+                {{ as_local(as_datetime(latest_end_value)).strftime(
+                  '%Y-%m-%d %H:%M:%S'
+                ) }}
+
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_advanced_forecast_last_updated
+            data:
+              datetime: >-
+                {{ now().strftime('%Y-%m-%d %H:%M:%S') }}
+
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.hems_advanced_forecast_status
+            data:
+              value: >-
+                {% if advanced_count | int(0) == usable_count | int(0) %}
+                  VALID_ADVANCED
+                {% else %}
+                  VALID_WITH_PER_KWH_FALLBACK
+                {% endif %}
+
+    default:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_advanced_cheap_grid_minutes_before_target
+        data:
+          value: 0
+
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hems_advanced_forecast_last_updated
+        data:
+          datetime: >-
+            {{ now().strftime('%Y-%m-%d %H:%M:%S') }}
+
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.hems_advanced_forecast_status
+        data:
+          value: NO_USABLE_INTERVALS
+
+mode: single
+max_exceeded: silent

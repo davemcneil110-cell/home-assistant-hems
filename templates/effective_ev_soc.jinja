@@ -1,0 +1,24 @@
+{% set test_away = is_state(
+    'input_boolean.hems_test_ev_away',
+    'on'
+  ) %}
+{% set test_home_plugged = is_state(
+    'input_boolean.hems_test_ev_home_plugged_low_soc',
+    'on'
+  ) %}
+{% set test_soc = states('input_number.hems_test_ev_soc') %}
+{% set live_soc = states('sensor.atto_3_battery_level') %}
+
+{% if test_away and test_home_plugged %}
+  unknown
+{% elif test_away or test_home_plugged %}
+  {% if is_number(test_soc) %}
+    {{ test_soc | float | round(0) | int }}
+  {% else %}
+    unknown
+  {% endif %}
+{% elif is_number(live_soc) %}
+  {{ live_soc | float | round(0) | int }}
+{% else %}
+  unknown
+{% endif %}

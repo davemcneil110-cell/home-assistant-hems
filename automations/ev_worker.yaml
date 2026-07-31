@@ -1,0 +1,1037 @@
+# Full UI YAML replacement. Revised 2026-07-31 after the live approved-recovery
+# interlock-transition stop loop and delayed SolarEdge acknowledgement.
+alias: HEMS - EV Worker
+description: >-
+  Sole EV charger control worker. It owns only deliberate cheap-grid, urgent
+  recovery, and approved charge-now sessions. A Powerwall interlock must remain
+  continuously READY for 60 seconds and is revalidated immediately before one
+  Start command. Once that guarded Start has been sent, any fused SolarEdge,
+  BYD, or electrical charging acknowledgement moves the Worker to a durable
+  running state even while the Powerwall is changing between early flexible
+  discharge, hold, and simultaneous cheap-grid charging. These Powerwall
+  changes are policy transitions, not EV safety faults, and can no longer issue
+  a protective Stop. The Powerwall Worker continues converging independently.
+  A Worker fault is durable and can only be reset manually; an unchanged charge
+  approval can therefore never recreate a failed session or repeat Start/Stop
+  commands. Manual override or disabling either controlling system releases
+  Worker ownership without sending a hardware command. It waits for real
+  charger acknowledgement, applies a no-repeat cooldown, and only stops
+  sessions that it owns when their charging permission genuinely ends. A
+  session being prepared for a Powerwall interlock is
+  not yet command-owned: if native SolarEdge or a person starts charging before
+  the Worker issues Start, the Worker yields without Stop or fault. Native
+  SolarEdge Excess Solar and manually started sessions are never claimed or
+  stopped. Either the SolarEdge connection
+  sensor or the BYD plug sensor may establish that the EV is physically
+  connected. Charging acknowledgement is fused from SolarEdge charging/power
+  and BYD charging/battery-power telemetry; BYD charging evidence overrides an
+  explicit SolarEdge off state, while unavailable SolarEdge telemetry is never
+  interpreted as confirmed off. A cheap-grid session is also checked directly
+  against the effective live grid-charge price limit, so an expensive interval
+  cannot continue merely because another planning sensor is stale. Any HEMS
+  test scenario or EV manual override blocks new hardware commands.
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.hems_ev_charge_permission
+      - sensor.hems_ev_powerwall_interlock_status
+      - sensor.hems_ev_worker_command_guard
+      - sensor.hems_effective_import_price
+      - sensor.hems_effective_grid_charge_price_limit
+      - binary_sensor.solaredge_ev_charger_ev_charger_charging
+      - binary_sensor.solaredge_ev_charger_ev_charger_connected
+      - sensor.solaredge_ev_charger_ev_charger_power
+      - sensor.solaredge_ev_charger_ev_charger_status
+      - binary_sensor.atto_3_plug
+      - binary_sensor.atto_3_charging
+      - sensor.atto_3_battery_power
+      - input_boolean.enable_ev_automation
+      - input_boolean.hems_ev_manual_override
+      - input_boolean.automatic_grid_charging_enabled
+      - input_boolean.hems_powerwall_manual_override
+      - input_boolean.hems_ev_worker_session_active
+      - input_select.hems_ev_worker_session_type
+  - trigger: state
+    entity_id:
+      - input_boolean.hems_test_mode
+      - input_boolean.hems_test_powerwall_low
+      - input_boolean.hems_test_negative_feed_in
+      - input_boolean.hems_test_battery_export
+      - input_boolean.hems_test_ev_away
+      - input_boolean.hems_test_ev_home_plugged_low_soc
+      - input_boolean.hems_test_solar_finished
+  - trigger: time_pattern
+    seconds: /15
+conditions: []
+actions:
+  - variables:
+      permission: "{{ states('sensor.hems_ev_charge_permission') }}"
+      command_state: "{{ states('input_select.hems_ev_worker_command_state') }}"
+      command_guard: "{{ states('sensor.hems_ev_worker_command_guard') }}"
+      session_active: >-
+        {{ is_state('input_boolean.hems_ev_worker_session_active', 'on') }}
+      session_type: "{{ states('input_select.hems_ev_worker_session_type') }}"
+      connected: >-
+        {{
+          is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+            'on'
+          )
+          or is_state('binary_sensor.atto_3_plug', 'on')
+        }}
+      connected_state: >-
+        {% set solaredge = states(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected'
+        ) %}
+        {% set byd = states('binary_sensor.atto_3_plug') %}
+        {% if solaredge == 'on' %}
+          solaredge
+        {% elif byd == 'on' %}
+          byd
+        {% elif solaredge == 'off' and byd == 'off' %}
+          off
+        {% else %}
+          unavailable
+        {% endif %}
+      charging: >-
+        {% set solaredge = states(
+          'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+        ) %}
+        {% set solaredge_power = states(
+          'sensor.solaredge_ev_charger_ev_charger_power'
+        ) %}
+        {% set solaredge_status = states(
+          'sensor.solaredge_ev_charger_ev_charger_status'
+        ) | lower %}
+        {% set byd = states('binary_sensor.atto_3_charging') %}
+        {% set byd_power = states('sensor.atto_3_battery_power') %}
+        {% set solaredge_on =
+          solaredge == 'on'
+          or (
+            is_number(solaredge_power)
+            and (solaredge_power | float) >= 1.0
+          )
+          or solaredge_status == 'charging'
+        %}
+        {% set solaredge_off =
+          solaredge == 'off'
+          and is_number(solaredge_power)
+          and (solaredge_power | float) < 0.5
+          and solaredge_status not in ['charging', 'initializing']
+        %}
+        {{
+          solaredge_on
+          or (
+            not solaredge_off
+            and (
+              byd == 'on'
+              or (
+                is_state('binary_sensor.atto_3_plug', 'on')
+                and is_number(byd_power)
+                and (byd_power | float | abs) >= 1000
+              )
+            )
+          )
+        }}
+      charging_state: >-
+        {% set solaredge = states(
+          'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+        ) %}
+        {% set byd = states('binary_sensor.atto_3_charging') %}
+        {% set solaredge_power = states(
+          'sensor.solaredge_ev_charger_ev_charger_power'
+        ) %}
+        {% set solaredge_status = states(
+          'sensor.solaredge_ev_charger_ev_charger_status'
+        ) | lower %}
+        {% set byd_power = states('sensor.atto_3_battery_power') %}
+        {% set solaredge_on =
+          solaredge == 'on'
+          or (
+            is_number(solaredge_power)
+            and (solaredge_power | float) >= 1.0
+          )
+          or solaredge_status == 'charging'
+        %}
+        {% set solaredge_off =
+          solaredge == 'off'
+          and
+          is_number(solaredge_power)
+          and (solaredge_power | float) < 0.5
+          and solaredge_status not in ['charging', 'initializing']
+        %}
+        {% set byd_on =
+          byd == 'on'
+          or (
+            is_state('binary_sensor.atto_3_plug', 'on')
+            and is_number(byd_power)
+            and (byd_power | float | abs) >= 1000
+          )
+        %}
+        {% if solaredge_on %}
+          on
+        {% elif byd_on %}
+          on
+        {% elif solaredge_off and byd == 'off' %}
+          off
+        {% else %}
+          unavailable
+        {% endif %}
+      recent_worker_start: >-
+        {% set last_command = as_timestamp(
+          states('input_datetime.hems_ev_worker_last_command'),
+          default=none
+        ) %}
+        {% set last_start = as_timestamp(
+          states('button.solaredge_ev_charger_ev_charger_start_charging'),
+          default=none
+        ) %}
+        {{
+          last_command is not none
+          and last_start is not none
+          and ((last_command - last_start) | abs) <= 5
+        }}
+      interlock_status: >-
+        {{ states('sensor.hems_ev_powerwall_interlock_status') }}
+      interlock_request: >-
+        {{ states('sensor.hems_ev_powerwall_interlock_request') }}
+      current_import_price_raw: >-
+        {{ states('sensor.hems_effective_import_price') }}
+      effective_grid_price_limit_raw: >-
+        {{ states('sensor.hems_effective_grid_charge_price_limit') }}
+      cheap_grid_price_valid: >-
+        {{
+          is_number(current_import_price_raw)
+          and is_number(effective_grid_price_limit_raw)
+        }}
+      current_grid_price_allowed: >-
+        {{
+          is_number(current_import_price_raw)
+          and is_number(effective_grid_price_limit_raw)
+          and (current_import_price_raw | float)
+            <= (effective_grid_price_limit_raw | float)
+        }}
+      interlock_ready_seconds: >-
+        {% set interlock = states.sensor.hems_ev_powerwall_interlock_status %}
+        {% if interlock is not none and interlock.state == 'READY' %}
+          {{ ([
+            as_timestamp(now()) - as_timestamp(interlock.last_changed),
+            0
+          ] | max) | int(0) }}
+        {% else %}
+          0
+        {% endif %}
+      test_active: >-
+        {{
+          is_state('input_boolean.hems_test_mode', 'on')
+          or is_state('input_boolean.hems_test_powerwall_low', 'on')
+          or is_state('input_boolean.hems_test_negative_feed_in', 'on')
+          or is_state('input_boolean.hems_test_battery_export', 'on')
+          or is_state('input_boolean.hems_test_ev_away', 'on')
+          or is_state(
+            'input_boolean.hems_test_ev_home_plugged_low_soc',
+            'on'
+          )
+          or is_state('input_boolean.hems_test_solar_finished', 'on')
+        }}
+      worker_control_allowed: >-
+        {{
+          is_state('input_boolean.enable_ev_automation', 'on')
+          and is_state('input_boolean.hems_ev_manual_override', 'off')
+          and not test_active
+        }}
+      powerwall_control_allowed: >-
+        {{
+          is_state('input_boolean.automatic_grid_charging_enabled', 'on')
+          and is_state('input_boolean.hems_powerwall_manual_override', 'off')
+        }}
+      permission_matches_session: >-
+        {{
+          (
+            session_type == 'cheap_grid'
+            and permission == 'ALLOW_CHEAP_GRID'
+            and current_grid_price_allowed
+          )
+          or (
+            session_type == 'urgent_recovery'
+            and permission in [
+              'EV_URGENT_START_TO_50',
+              'EV_URGENT_CONTINUE_TO_50'
+            ]
+          )
+          or (
+            session_type == 'approved_recovery'
+            and permission == 'EV_APPROVED_CHARGE_NOW'
+          )
+        }}
+  - choose:
+      # A deliberate manual takeover never causes the Worker to fight the user.
+      # Release ownership and enter cooldown without pressing Start or Stop.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                session_active
+                and command_state != 'fault'
+                and (
+                  is_state('input_boolean.enable_ev_automation', 'off')
+                  or is_state('input_boolean.hems_ev_manual_override', 'on')
+                  or is_state(
+                    'input_boolean.automatic_grid_charging_enabled',
+                    'off'
+                  )
+                  or is_state(
+                    'input_boolean.hems_powerwall_manual_override',
+                    'on'
+                  )
+                )
+              }}
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: cooldown
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Worker ownership released
+              message: >-
+                Manual override or a controlling automation was disabled. The
+                EV Worker released session ownership and sent no charger
+                command. Manual or native charging may continue unchanged.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Worker ownership released
+              message: >-
+                Manual override or a controlling automation was disabled. The
+                EV Worker released session ownership and sent no charger
+                command. Manual or native charging may continue unchanged.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+
+      # A confirmed protective Stop enters FAULT_LOCKOUT but always releases
+      # session ownership and the Powerwall interlock. This prevents a failed
+      # EV command from stranding the Powerwall in backup mode.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_state == 'protective_stop_pending'
+                and charging_state == 'off'
+              }}
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV protective Stop confirmed
+              message: >-
+                SolarEdge confirmed charging stopped after the Powerwall
+                interlock was lost. The Worker entered FAULT_LOCKOUT, released
+                session ownership and the Powerwall interlock, and sent no
+                repeated Stop command.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV protective Stop confirmed
+              message: >-
+                SolarEdge confirmed charging stopped after the Powerwall
+                interlock was lost. The Worker entered FAULT_LOCKOUT, released
+                session ownership and the Powerwall interlock, and sent no
+                repeated Stop command.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      # A protective Stop that is not acknowledged becomes a durable fault.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'PROTECTIVE_STOP_ACK_TIMEOUT'
+                and command_state == 'protective_stop_pending'
+                and charging_state != 'off'
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV protective Stop not confirmed
+              message: >-
+                EV charging and power telemetry did not confirm the protective
+                Stop within 12 minutes after the Powerwall interlock was lost.
+                The Worker entered FAULT_LOCKOUT, released session ownership
+                and the Powerwall interlock, and sent no repeated command. Stop
+                and check the charger manually before resetting the Worker.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV protective Stop not confirmed
+              message: >-
+                EV charging and power telemetry did not confirm the protective
+                Stop within 12 minutes after the Powerwall interlock was lost.
+                The Worker entered FAULT_LOCKOUT, released session ownership
+                and the Powerwall interlock, and sent no repeated command. Stop
+                and check the charger manually before resetting the Worker.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      # Stop watching for a delayed Start after the same bounded 12-minute
+      # acknowledgement period. No hardware command is sent when charging
+      # never appeared, and all interlock state is released.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'INTERLOCK_WATCH_TIMEOUT'
+                and command_state == 'interlock_lost_waiting_stop'
+                and charging_state != 'on'
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV delayed Start watch ended
+              message: >-
+                No charger source confirmed a delayed Start within 12 minutes
+                after the Powerwall interlock was lost. The Worker entered
+                FAULT_LOCKOUT and released session ownership and the Powerwall
+                interlock. No repeated Start or Stop command was sent.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV delayed Start watch ended
+              message: >-
+                No charger source confirmed a delayed Start within 12 minutes
+                after the Powerwall interlock was lost. The Worker entered
+                FAULT_LOCKOUT and released session ownership and the Powerwall
+                interlock. No repeated Start or Stop command was sent.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      # A planned session is used to prepare the Powerwall interlock before the
+      # Worker has issued Start. If native SolarEdge control or a person starts
+      # charging during that preparation window, yield the plan without sending
+      # Stop and without entering FAULT_LOCKOUT. A confirmed Worker Start moves
+      # to the durable `running` state below, so this branch can never release a
+      # mature Worker-owned session after its command timestamp ages or its
+      # SolarEdge button entity becomes temporarily unavailable.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                session_active
+                and charging_state == 'on'
+                and command_state == 'idle'
+                and not recent_worker_start
+              }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV manual/native charging detected
+              message: >-
+                Charging began before the EV Worker issued its guarded Start.
+                The Worker released its planned session and Powerwall interlock,
+                sent no Stop command, and left this manual or native SolarEdge
+                session running.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV manual/native charging detected
+              message: >-
+                Charging began before the EV Worker issued its guarded Start.
+                The Worker released its planned session and Powerwall interlock,
+                sent no Stop command, and left this manual or native SolarEdge
+                session running.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+
+      # Start timeout after the bounded 12-minute acknowledgement window.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'START_ACK_TIMEOUT'
+                and command_state == 'start_pending'
+                and charging_state == 'off'
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Start not confirmed
+              message: >-
+                No EV charging or power source confirmed charging within 12
+                minutes. The EV Worker released its Powerwall hold and entered
+                FAULT_LOCKOUT. No repeated Start command was sent. Check the
+                charger, then manually reset HEMS EV Worker Command State to
+                idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Start not confirmed
+              message: >-
+                No EV charging or power source confirmed charging within 12
+                minutes. The EV Worker released its Powerwall hold and entered
+                FAULT_LOCKOUT. No repeated Start command was sent. Check the
+                charger, then manually reset HEMS EV Worker Command State to
+                idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'START_ACK_TIMEOUT'
+                and command_state == 'start_pending'
+                and charging_state not in ['off', 'on']
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV state unavailable after Start
+              message: >-
+                No EV source provided a reliable charging state within 12
+                minutes of Start. The Worker entered FAULT_LOCKOUT, released
+                session ownership and the Powerwall interlock, and sent no
+                repeated command. Check the charger before manually resetting
+                the command state to idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV state unavailable after Start
+              message: >-
+                No EV source provided a reliable charging state within 12
+                minutes of Start. The Worker entered FAULT_LOCKOUT, released
+                session ownership and the Powerwall interlock, and sent no
+                repeated command. Check the charger before manually resetting
+                the command state to idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      # Stop timeout after the bounded 12-minute acknowledgement window.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'STOP_ACK_TIMEOUT'
+                and command_state == 'stop_pending'
+                and charging_state != 'off'
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: fault
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Stop not confirmed
+              message: >-
+                SolarEdge still indicates charging 12 minutes after the Stop
+                command. The Worker entered FAULT_LOCKOUT, released session
+                ownership and the Powerwall interlock, and sent no repeated
+                command. Stop and check the charger manually before resetting
+                the command state to idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV Stop not confirmed
+              message: >-
+                SolarEdge still indicates charging 12 minutes after the Stop
+                command. The Worker entered FAULT_LOCKOUT, released session
+                ownership and the Powerwall interlock, and sent no repeated
+                command. Stop and check the charger manually before resetting
+                the command state to idle.
+              data:
+                tag: hems_ev_worker_fault
+                alert_once: true
+
+      # Start was issued only after 60 seconds of READY interlock. Once fused
+      # telemetry proves the EV is charging, preserve ownership even if the
+      # Powerwall has begun a legitimate policy transition.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_state == 'start_pending'
+                and charging_state == 'on'
+              }}
+        sequence:
+          # The durable running state is the authoritative ownership proof. It
+          # remains set until a confirmed Worker Stop moves to cooldown.
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: running
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charging started
+              message: >-
+                EV charging telemetry confirmed the Worker-owned
+                {{ session_type }} session. Powerwall interlock:
+                {{ interlock_status }}. Powerwall policy transitions will not
+                interrupt this confirmed charging session.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charging started
+              message: >-
+                EV charging telemetry confirmed the Worker-owned
+                {{ session_type }} session. Powerwall interlock:
+                {{ interlock_status }}. Powerwall policy transitions will not
+                interrupt this confirmed charging session.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ command_state == 'stop_pending' and charging_state == 'off' }}
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: cooldown
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charging stopped
+              message: >-
+                EV charging and power telemetry confirmed that the
+                Worker-owned session stopped. Session ownership and its
+                Powerwall hold have been released. Current permission:
+                {{ permission }}.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charging stopped
+              message: >-
+                EV charging and power telemetry confirmed that the
+                Worker-owned session stopped. Session ownership and its
+                Powerwall hold have been released. Current permission:
+                {{ permission }}.
+              data:
+                tag: hems_ev_worker_status
+                alert_once: true
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                command_guard == 'COOLDOWN_COMPLETE'
+                and command_state == 'cooldown'
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: idle
+
+      # Release an inactive, unconfirmed session only when it is not in a
+      # retained safety or fault state.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                session_active
+                and charging_state == 'off'
+                and command_state not in [
+                  'start_pending',
+                  'stop_pending',
+                  'interlock_lost_waiting_stop',
+                  'protective_stop_pending',
+                  'fault'
+                ]
+                and (
+                  not connected
+                  or is_state('input_boolean.enable_ev_automation', 'off')
+                  or not permission_matches_session
+                  or not powerwall_control_allowed
+                )
+              }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+
+      # Normal stop decision for an owned session whose charging permission has
+      # ended. The direct current-price check is defence in depth for cheap-grid
+      # sessions: urgent recovery below 50% and explicitly approved recovery
+      # remain governed by their own permission rules.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                session_active
+                and charging_state == 'on'
+                and command_guard == 'READY'
+                and not test_active
+                and is_state('input_boolean.hems_ev_manual_override', 'off')
+                and (
+                  is_state('input_boolean.enable_ev_automation', 'off')
+                  or not permission_matches_session
+                  or (
+                    session_type == 'cheap_grid'
+                    and (
+                      not cheap_grid_price_valid
+                      or not current_grid_price_allowed
+                    )
+                  )
+                  or not connected
+                )
+              }}
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: stop_pending
+          - action: button.press
+            target:
+              entity_id: button.solaredge_ev_charger_ev_charger_stop_charging
+
+      # Claim a new eligible session. This does not issue a hardware command.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                not session_active
+                and worker_control_allowed
+                and powerwall_control_allowed
+                and command_guard == 'READY'
+                and connected
+                and charging_state == 'off'
+                and states('sensor.ev_charging_availability') == 'READY'
+                and permission in [
+                  'ALLOW_CHEAP_GRID',
+                  'EV_URGENT_START_TO_50',
+                  'EV_URGENT_CONTINUE_TO_50',
+                  'EV_APPROVED_CHARGE_NOW'
+                ]
+                and is_number(states(
+                  'sensor.house_home_energy_gateway_teslemetry_percentage_charged'
+                ))
+              }}
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hems_ev_session_start_powerwall_soc
+            data:
+              value: >-
+                {{ states(
+                     'sensor.house_home_energy_gateway_teslemetry_percentage_charged'
+                   ) | float | round(0) }}
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ permission == 'ALLOW_CHEAP_GRID' }}"
+                sequence:
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_ev_worker_session_type
+                    data:
+                      option: cheap_grid
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        permission in [
+                          'EV_URGENT_START_TO_50',
+                          'EV_URGENT_CONTINUE_TO_50'
+                        ]
+                      }}
+                sequence:
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_ev_worker_session_type
+                    data:
+                      option: urgent_recovery
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: input_boolean.hems_ev_urgent_charge_active
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ permission == 'EV_APPROVED_CHARGE_NOW' }}
+                sequence:
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_ev_worker_session_type
+                    data:
+                      option: approved_recovery
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.hems_ev_worker_session_active
+
+      # Issue one Start only after 60 seconds of uninterrupted READY status.
+      # A final live check of the interlock and raw Powerwall readback occurs
+      # immediately before changing command state and pressing Start.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                session_active
+                and worker_control_allowed
+                and powerwall_control_allowed
+                and permission_matches_session
+                and command_guard == 'READY'
+                and connected
+                and charging_state == 'off'
+                and interlock_status == 'READY'
+                and (interlock_ready_seconds | int(0)) >= 60
+              }}
+        sequence:
+          - condition: template
+            value_template: >-
+              {% set interlock =
+                states.sensor.hems_ev_powerwall_interlock_status %}
+              {% set desired_mode =
+                states('sensor.hems_coordinated_powerwall_mode') %}
+              {% set desired_reserve =
+                states('sensor.hems_coordinated_powerwall_reserve') %}
+              {% set actual_mode = states(
+                'select.house_home_energy_gateway_teslemetry_operation_mode'
+              ) %}
+              {% set actual_reserve = states(
+                'number.house_home_energy_gateway_teslemetry_backup_reserve'
+              ) %}
+              {{
+                interlock is not none
+                and interlock.state == 'READY'
+                and (
+                  as_timestamp(now())
+                  - as_timestamp(interlock.last_changed)
+                ) >= 60
+                and is_state('input_boolean.enable_ev_automation', 'on')
+                and is_state('input_boolean.hems_ev_manual_override', 'off')
+                and is_state(
+                  'input_boolean.automatic_grid_charging_enabled',
+                  'on'
+                )
+                and is_state(
+                  'input_boolean.hems_powerwall_manual_override',
+                  'off'
+                )
+                and actual_mode == desired_mode
+                and is_number(desired_reserve)
+                and is_number(actual_reserve)
+                and (
+                  (actual_reserve | float) - (desired_reserve | float)
+                ) | abs < 0.5
+                and (
+                  is_state(
+                    'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                    'on'
+                  )
+                  or is_state('binary_sensor.atto_3_plug', 'on')
+                )
+                and is_state(
+                  'binary_sensor.solaredge_ev_charger_ev_charger_charging',
+                  'off'
+                )
+              }}
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: start_pending
+          - action: button.press
+            target:
+              entity_id: button.solaredge_ev_charger_ev_charger_start_charging
+mode: queued
+max: 20
+max_exceeded: silent

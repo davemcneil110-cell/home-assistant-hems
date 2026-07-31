@@ -1,0 +1,269 @@
+alias: HEMS - Cloudy Day Grid Charge Approval
+description: >-
+  At 9:00 AM, evaluates the hourly weather forecast from the assessment time
+  until sunset. If at least half of the remaining daylight forecast intervals
+  are cloudy or wet, requests primary user's approval before HEMS may use the higher
+  cloudy-day grid-charge price. Overnight weather and the weather entity's
+  current state are deliberately ignored. No response or a declined request
+  keeps the normal maximum grid-charge price. This automation changes only the
+  HEMS approval helper and sends notifications; it does not directly control
+  hardware.
+
+triggers:
+  - trigger: time
+    at: "09:00:00"
+    id: evaluate
+
+  - trigger: homeassistant
+    event: start
+    id: startup
+
+  - trigger: time
+    at: "00:01:00"
+    id: reset
+
+  - trigger: event
+    event_type: mobile_app_notification_action
+    event_data:
+      action: HEMS_CLOUDY_GRID_APPROVE
+    id: approve
+
+  - trigger: event
+    event_type: mobile_app_notification_action
+    event_data:
+      action: HEMS_CLOUDY_GRID_DECLINE
+    id: decline
+
+conditions: []
+
+actions:
+  - variables:
+      normal_price_raw: >-
+        {{ states('input_number.maximum_grid_charge') }}
+
+      cloudy_price_raw: >-
+        {{ states('input_number.cloudy_day_grid_price') }}
+
+      decision: >-
+        {{ states('input_select.hems_cloudy_day_grid_charge_decision') }}
+
+      cheapest_visible_price_raw: >-
+        {{ states('sensor.hems_cheapest_visible_import_price') }}
+
+      cheap_grid_minutes_raw: >-
+        {{ states('sensor.hems_cheap_grid_minutes_before_target') }}
+
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: reset
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            data:
+              option: not_asked
+
+      - conditions:
+          - condition: trigger
+            id: approve
+
+          - condition: state
+            entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            state: pending
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            data:
+              option: approved
+
+          - action: notify.mobile_app_primary_phone
+            data:
+              title: HEMS cloudy-day allowance approved
+              message: >-
+                Cloudy-day grid charging is approved for today. HEMS may now
+                use up to ${{ cloudy_price_raw | float(0) | round(2) }}/kWh
+                when its existing target and energy-shortfall rules require
+                grid support. The normal limit is
+                ${{ normal_price_raw | float(0) | round(2) }}/kWh.
+              data:
+                tag: hems_cloudy_grid_charge_approval
+
+      - conditions:
+          - condition: trigger
+            id: decline
+
+          - condition: state
+            entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            state: pending
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            data:
+              option: declined
+
+          - action: notify.mobile_app_primary_phone
+            data:
+              title: HEMS normal grid limit retained
+              message: >-
+                Cloudy-day pricing was not approved. HEMS will keep today's
+                normal grid-charge limit at
+                ${{ normal_price_raw | float(0) | round(2) }}/kWh.
+              data:
+                tag: hems_cloudy_grid_charge_approval
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (trigger.id | default('manual'))
+                  in ['evaluate', 'startup'] }}
+
+          - condition: template
+            value_template: >-
+              {{ (trigger.id | default('manual')) == 'evaluate'
+                  or (now().hour == 9 and now().minute <= 59) }}
+
+          - condition: state
+            entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            state: not_asked
+
+          - condition: template
+            value_template: >-
+              {{ is_number(normal_price_raw)
+                  and is_number(cloudy_price_raw) }}
+        sequence:
+          - action: weather.get_forecasts
+            target:
+              entity_id: weather.forecast_home
+            data:
+              type: hourly
+            response_variable: hems_hourly_weather
+
+          - variables:
+              hourly_forecast: >-
+                {{ hems_hourly_weather
+                    .get('weather.forecast_home', {})
+                    .get('forecast', []) }}
+
+              daylight_interval_count: >-
+                {% set ns = namespace(count=0) %}
+                {% set sunset = as_datetime(
+                    state_attr('sun.sun', 'next_setting'), none) %}
+                {% for item in hourly_forecast %}
+                  {% set forecast_time = as_datetime(
+                      item.get('datetime'), none) %}
+                  {% if forecast_time is not none
+                        and sunset is not none
+                        and forecast_time >= now()
+                        and forecast_time <= sunset %}
+                    {% set ns.count = ns.count + 1 %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.count }}
+
+              cloudy_interval_count: >-
+                {% set cloudy_conditions = [
+                  'partlycloudy',
+                  'cloudy',
+                  'overcast',
+                  'rainy',
+                  'pouring',
+                  'lightning',
+                  'lightning-rainy',
+                  'hail',
+                  'fog',
+                  'snowy',
+                  'snowy-rainy'
+                ] %}
+                {% set ns = namespace(count=0) %}
+                {% set sunset = as_datetime(
+                    state_attr('sun.sun', 'next_setting'), none) %}
+                {% for item in hourly_forecast %}
+                  {% set forecast_time = as_datetime(
+                      item.get('datetime'), none) %}
+                  {% set condition = item.get('condition', '') | lower %}
+                  {% if forecast_time is not none
+                        and sunset is not none
+                        and forecast_time >= now()
+                        and forecast_time <= sunset
+                        and condition in cloudy_conditions %}
+                    {% set ns.count = ns.count + 1 %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.count }}
+
+              daylight_condition_summary: >-
+                {% set ns = namespace(conditions=[]) %}
+                {% set sunset = as_datetime(
+                    state_attr('sun.sun', 'next_setting'), none) %}
+                {% for item in hourly_forecast %}
+                  {% set forecast_time = as_datetime(
+                      item.get('datetime'), none) %}
+                  {% set condition = item.get('condition', '')
+                      | lower | replace('-', ' ') %}
+                  {% if forecast_time is not none
+                        and sunset is not none
+                        and forecast_time >= now()
+                        and forecast_time <= sunset
+                        and condition not in ns.conditions %}
+                    {% set ns.conditions = ns.conditions + [condition] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.conditions | reject('equalto', '') | join(', ') }}
+
+              cloudy_ratio: >-
+                {% set total = daylight_interval_count | int(0) %}
+                {% set cloudy = cloudy_interval_count | int(0) %}
+                {{ (cloudy / total) if total > 0 else 0 }}
+
+          - condition: template
+            value_template: >-
+              {{ daylight_interval_count | int(0) > 0 }}
+
+          - condition: template
+            value_template: >-
+              {{ cloudy_ratio | float(0) >= 0.5 }}
+
+          - action: notify.mobile_app_primary_phone
+            data:
+              title: HEMS cloudy-day grid allowance
+              message: >-
+                The daylight forecast from 9 AM to sunset has
+                {{ cloudy_interval_count | int(0) }} cloudy or wet intervals
+                out of {{ daylight_interval_count | int(0) }}. Forecast:
+                {{ daylight_condition_summary | default('unavailable', true) }}.
+                Approve changing the HEMS grid-charge price limit from
+                ${{ normal_price_raw | float | round(2) }}/kWh to
+                ${{ cloudy_price_raw | float | round(2) }}/kWh for today?
+                {% if is_number(cheapest_visible_price_raw) %}
+                The cheapest currently visible import price is
+                ${{ cheapest_visible_price_raw | float | round(2) }}/kWh.
+                {% endif %}
+                {% if is_number(cheap_grid_minutes_raw) %}
+                There are {{ cheap_grid_minutes_raw | float(0) | round(0) | int }}
+                visible cheap-grid minutes before the charging target.
+                {% endif %}
+                Charging will still occur only when existing target and
+                calculated energy-shortfall rules require it. If you decline
+                or do not respond, HEMS keeps the normal limit.
+              data:
+                tag: hems_cloudy_grid_charge_approval
+                alert_once: true
+                actions:
+                  - action: HEMS_CLOUDY_GRID_APPROVE
+                    title: Use cloudy allowance
+
+                  - action: HEMS_CLOUDY_GRID_DECLINE
+                    title: Keep normal limit
+
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_cloudy_day_grid_charge_decision
+            data:
+              option: pending
+
+mode: queued
+max: 10
+max_exceeded: silent

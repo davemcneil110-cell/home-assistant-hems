@@ -1,0 +1,24 @@
+# Credentials and local Home Assistant data must never enter this repository.
+secrets.yaml
+.storage/
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+backups/
+private/
+
+# Local tooling/runtime files.
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

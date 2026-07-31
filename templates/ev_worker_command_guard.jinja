@@ -1,0 +1,59 @@
+{# Complete replacement STATE TEMPLATE for HEMS EV Worker Command Guard.
+   Revised 2026-07-29. A confirmed Worker-owned charge now remains in the
+   durable `running` state until the Worker issues and confirms Stop. #}
+
+{% set command_state = states('input_select.hems_ev_worker_command_state') %}
+{% set last_command_raw = states('input_datetime.hems_ev_worker_last_command') %}
+{% set valid_states = [
+  'idle',
+  'start_pending',
+  'running',
+  'stop_pending',
+  'cooldown',
+  'interlock_lost_waiting_stop',
+  'protective_stop_pending',
+  'fault'
+] %}
+
+{% if command_state not in valid_states
+      or last_command_raw in ['unknown', 'unavailable', ''] %}
+  INPUT_UNAVAILABLE
+{% else %}
+  {% set last_timestamp = as_timestamp(last_command_raw, default=none) %}
+  {% if last_timestamp is none %}
+    INPUT_UNAVAILABLE
+  {% else %}
+    {% set elapsed = [as_timestamp(now()) - last_timestamp, 0] | max %}
+
+    {% if command_state == 'idle' and elapsed >= 120 %}
+      READY
+    {% elif command_state == 'idle' %}
+      COOLDOWN_ACTIVE
+    {% elif command_state == 'running' %}
+      READY
+    {% elif command_state == 'start_pending' and elapsed <= 720 %}
+      START_PENDING
+    {% elif command_state == 'start_pending' %}
+      START_ACK_TIMEOUT
+    {% elif command_state == 'stop_pending' and elapsed <= 720 %}
+      STOP_PENDING
+    {% elif command_state == 'stop_pending' %}
+      STOP_ACK_TIMEOUT
+    {% elif command_state == 'cooldown' and elapsed < 120 %}
+      COOLDOWN_ACTIVE
+    {% elif command_state == 'interlock_lost_waiting_stop'
+          and elapsed <= 720 %}
+      INTERLOCK_LOST_WAITING_STOP
+    {% elif command_state == 'interlock_lost_waiting_stop' %}
+      INTERLOCK_WATCH_TIMEOUT
+    {% elif command_state == 'protective_stop_pending' and elapsed <= 720 %}
+      PROTECTIVE_STOP_PENDING
+    {% elif command_state == 'protective_stop_pending' %}
+      PROTECTIVE_STOP_ACK_TIMEOUT
+    {% elif command_state == 'fault' %}
+      FAULT_LOCKOUT
+    {% else %}
+      COOLDOWN_COMPLETE
+    {% endif %}
+  {% endif %}
+{% endif %}

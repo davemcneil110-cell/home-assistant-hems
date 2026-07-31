@@ -1,0 +1,38 @@
+{% set test_away = is_state('input_boolean.hems_test_ev_away', 'on') %}
+{% set test_home_plugged = is_state('input_boolean.hems_test_ev_home_plugged_low_soc', 'on') %}
+
+{% set charger_connected_raw = states(
+  'binary_sensor.solaredge_ev_charger_ev_charger_connected'
+) %}
+{% set charger_charging_raw = states(
+  'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+) %}
+{% set solaredge_valid = charger_connected_raw in ['on', 'off']
+    and charger_charging_raw in ['on', 'off'] %}
+{% set vehicle_plugged = is_state('binary_sensor.atto_3_plug', 'on') %}
+{% set vehicle_charging = is_state('binary_sensor.atto_3_charging', 'on') %}
+{% set gps_state = states('device_tracker.atto_3_location') %}
+
+{% if test_away and test_home_plugged %}
+  TEST_CONFLICT
+{% elif test_away %}
+  AWAY
+{% elif test_home_plugged %}
+  READY
+{% elif charger_charging_raw == 'on' or vehicle_charging %}
+  CHARGING
+{% elif charger_connected_raw == 'on' or vehicle_plugged %}
+  READY
+{% elif solaredge_valid and gps_state == 'home' %}
+  UNAVAILABLE
+{% elif solaredge_valid and gps_state == 'not_home' %}
+  AWAY
+{% elif solaredge_valid %}
+  UNKNOWN
+{% elif gps_state == 'home' %}
+  UNAVAILABLE
+{% elif gps_state == 'not_home' %}
+  AWAY
+{% else %}
+  UNKNOWN
+{% endif %}
