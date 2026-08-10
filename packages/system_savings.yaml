@@ -316,6 +316,181 @@ template:
           {% set battery = states('sensor.hems_powerwall_savings_selected_period') | float(0) %}
           {{ (solar + battery) | round(2) }}
 
+      - name: HEMS Solar Energy Since Tracking
+        unique_id: hems_solar_energy_since_tracking
+        icon: mdi:solar-power
+        device_class: energy
+        unit_of_measurement: kWh
+        state_class: total
+        state: >-
+          {% set home = states('sensor.hems_solar_to_home_energy') | float(0) %}
+          {% set ev = states('sensor.hems_solar_to_ev_energy') | float(0) %}
+          {% set battery = states('sensor.hems_solar_to_powerwall_energy') | float(0) %}
+          {% set grid = states('sensor.hems_solar_to_grid_energy') | float(0) %}
+          {{ ([home + ev + battery + grid, 0] | max) | round(4) }}
+
+      - name: HEMS Powerwall Discharged Energy Since Tracking
+        unique_id: hems_powerwall_discharged_energy_since_tracking
+        icon: mdi:home-battery
+        device_class: energy
+        unit_of_measurement: kWh
+        state_class: total
+        state: >-
+          {% set home = states('sensor.hems_powerwall_to_home_energy') | float(0) %}
+          {% set ev = states('sensor.hems_powerwall_to_ev_energy') | float(0) %}
+          {% set grid = states('sensor.hems_powerwall_to_grid_energy') | float(0) %}
+          {{ ([home + ev + grid, 0] | max) | round(4) }}
+
+      - name: HEMS Powerwall Avoided Import Energy Since Tracking
+        unique_id: hems_powerwall_avoided_import_energy_since_tracking
+        icon: mdi:home-lightning-bolt
+        device_class: energy
+        unit_of_measurement: kWh
+        state_class: total
+        state: >-
+          {% set home = states('sensor.hems_powerwall_to_home_energy') | float(0) %}
+          {% set ev = states('sensor.hems_powerwall_to_ev_energy') | float(0) %}
+          {{ ([home + ev, 0] | max) | round(4) }}
+
+      - name: HEMS Powerwall Avoided Import Value Selected Period
+        unique_id: hems_powerwall_avoided_import_value_selected_period
+        icon: mdi:transmission-tower-off
+        device_class: monetary
+        unit_of_measurement: AUD
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_powerwall_avoided_import_value_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_powerwall_avoided_import_value_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_powerwall_avoided_import_value_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_powerwall_avoided_import_value_this_year') | float(0) | round(2) }}
+          {% else %}
+            {% set historical = states('sensor.hems_powerwall_historical_savings_baseline') | float(0) %}
+            {% set tracked = states('sensor.hems_powerwall_avoided_import_value_since_tracking') | float(0) %}
+            {{ (historical + tracked) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Powerwall Avoided Import Energy Selected Period
+        unique_id: hems_powerwall_avoided_import_energy_selected_period
+        icon: mdi:home-lightning-bolt
+        device_class: energy
+        unit_of_measurement: kWh
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_powerwall_avoided_import_energy_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_powerwall_avoided_import_energy_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_powerwall_avoided_import_energy_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_powerwall_avoided_import_energy_this_year') | float(0) | round(2) }}
+          {% else %}
+            {% set historical = states('input_number.hems_powerwall_historical_discharge_energy') | float(0) %}
+            {% set tracked = states('sensor.hems_powerwall_avoided_import_energy_since_tracking') | float(0) %}
+            {{ (historical + tracked) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Solar Energy Selected Period
+        unique_id: hems_solar_energy_selected_period
+        icon: mdi:solar-power
+        device_class: energy
+        unit_of_measurement: kWh
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_solar_energy_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_solar_energy_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_solar_energy_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_solar_energy_this_year') | float(0) | round(2) }}
+          {% else %}
+            {% set historical = states('input_number.hems_solar_historical_lifetime_energy') | float(0) %}
+            {% set tracked = states('sensor.hems_solar_energy_since_tracking') | float(0) %}
+            {{ (historical + tracked) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Powerwall Energy Selected Period
+        unique_id: hems_powerwall_energy_selected_period
+        icon: mdi:home-battery
+        device_class: energy
+        unit_of_measurement: kWh
+        state: >-
+          {% set period = states('input_select.hems_savings_timescale') %}
+          {% if period == 'Today' %}
+            {{ states('sensor.hems_powerwall_energy_today') | float(0) | round(2) }}
+          {% elif period == 'This Week' %}
+            {{ states('sensor.hems_powerwall_energy_this_week') | float(0) | round(2) }}
+          {% elif period == 'This Month' %}
+            {{ states('sensor.hems_powerwall_energy_this_month') | float(0) | round(2) }}
+          {% elif period == 'This Year' %}
+            {{ states('sensor.hems_powerwall_energy_this_year') | float(0) | round(2) }}
+          {% else %}
+            {% set historical = states('input_number.hems_powerwall_historical_discharge_energy') | float(0) %}
+            {% set tracked = states('sensor.hems_powerwall_discharged_energy_since_tracking') | float(0) %}
+            {{ (historical + tracked) | round(2) }}
+          {% endif %}
+
+      - name: HEMS Solar Average Savings Selected Period
+        unique_id: hems_solar_average_savings_selected_period
+        icon: mdi:solar-power-variant
+        unit_of_measurement: AUD/kWh
+        state_class: measurement
+        state: >-
+          {% set savings = states('sensor.hems_solar_savings_selected_period') | float(0) %}
+          {% set energy = states('sensor.hems_solar_energy_selected_period') | float(0) %}
+          {% if energy > 0.001 %}
+            {{ (savings / energy) | round(4) }}
+          {% else %}
+            0
+          {% endif %}
+        attributes:
+          selected_period: "{{ states('input_select.hems_savings_timescale') }}"
+          selected_savings_aud: "{{ states('sensor.hems_solar_savings_selected_period') | float(0) | round(2) }}"
+          selected_energy_kwh: "{{ states('sensor.hems_solar_energy_selected_period') | float(0) | round(2) }}"
+
+      - name: HEMS Powerwall Average Net Savings Selected Period
+        unique_id: hems_powerwall_average_savings_selected_period
+        icon: mdi:home-battery
+        unit_of_measurement: AUD/kWh
+        state_class: measurement
+        state: >-
+          {% set savings = states('sensor.hems_powerwall_savings_selected_period') | float(0) %}
+          {% set energy = states('sensor.hems_powerwall_energy_selected_period') | float(0) %}
+          {% if energy > 0.001 %}
+            {{ (savings / energy) | round(4) }}
+          {% else %}
+            0
+          {% endif %}
+        attributes:
+          selected_period: "{{ states('input_select.hems_savings_timescale') }}"
+          selected_savings_aud: "{{ states('sensor.hems_powerwall_savings_selected_period') | float(0) | round(2) }}"
+          selected_energy_kwh: "{{ states('sensor.hems_powerwall_energy_selected_period') | float(0) | round(2) }}"
+
+      - name: HEMS Powerwall Average Avoided Grid Price Selected Period
+        unique_id: hems_powerwall_average_avoided_grid_price_selected_period
+        icon: mdi:transmission-tower-off
+        unit_of_measurement: AUD/kWh
+        state_class: measurement
+        state: >-
+          {% set value = states('sensor.hems_powerwall_avoided_import_value_selected_period') | float(0) %}
+          {% set energy = states('sensor.hems_powerwall_avoided_import_energy_selected_period') | float(0) %}
+          {% if energy > 0.001 %}
+            {{ (value / energy) | round(4) }}
+          {% else %}
+            0
+          {% endif %}
+        attributes:
+          selected_period: "{{ states('input_select.hems_savings_timescale') }}"
+          avoided_import_value_aud: "{{ states('sensor.hems_powerwall_avoided_import_value_selected_period') | float(0) | round(2) }}"
+          avoided_import_energy_kwh: "{{ states('sensor.hems_powerwall_avoided_import_energy_selected_period') | float(0) | round(2) }}"
+          current_live_import_price_aud_per_kwh: "{{ states('sensor.hems_savings_live_import_price') | float(0) | round(4) }}"
+
 sensor:
   - platform: integration
     source: sensor.hems_solar_avoided_import_savings_rate
@@ -422,4 +597,100 @@ utility_meter:
     source: sensor.hems_powerwall_savings_since_tracking
     cycle: yearly
     net_consumption: true
+    periodically_resetting: false
+
+  hems_solar_energy_today:
+    name: HEMS Solar Energy Today
+    source: sensor.hems_solar_energy_since_tracking
+    cycle: daily
+    periodically_resetting: false
+
+  hems_solar_energy_this_week:
+    name: HEMS Solar Energy This Week
+    source: sensor.hems_solar_energy_since_tracking
+    cycle: weekly
+    periodically_resetting: false
+
+  hems_solar_energy_this_month:
+    name: HEMS Solar Energy This Month
+    source: sensor.hems_solar_energy_since_tracking
+    cycle: monthly
+    periodically_resetting: false
+
+  hems_solar_energy_this_year:
+    name: HEMS Solar Energy This Year
+    source: sensor.hems_solar_energy_since_tracking
+    cycle: yearly
+    periodically_resetting: false
+
+  hems_powerwall_energy_today:
+    name: HEMS Powerwall Energy Today
+    source: sensor.hems_powerwall_discharged_energy_since_tracking
+    cycle: daily
+    periodically_resetting: false
+
+  hems_powerwall_energy_this_week:
+    name: HEMS Powerwall Energy This Week
+    source: sensor.hems_powerwall_discharged_energy_since_tracking
+    cycle: weekly
+    periodically_resetting: false
+
+  hems_powerwall_energy_this_month:
+    name: HEMS Powerwall Energy This Month
+    source: sensor.hems_powerwall_discharged_energy_since_tracking
+    cycle: monthly
+    periodically_resetting: false
+
+  hems_powerwall_energy_this_year:
+    name: HEMS Powerwall Energy This Year
+    source: sensor.hems_powerwall_discharged_energy_since_tracking
+    cycle: yearly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_value_today:
+    name: HEMS Powerwall Avoided Import Value Today
+    source: sensor.hems_powerwall_avoided_import_value_since_tracking
+    cycle: daily
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_value_this_week:
+    name: HEMS Powerwall Avoided Import Value This Week
+    source: sensor.hems_powerwall_avoided_import_value_since_tracking
+    cycle: weekly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_value_this_month:
+    name: HEMS Powerwall Avoided Import Value This Month
+    source: sensor.hems_powerwall_avoided_import_value_since_tracking
+    cycle: monthly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_value_this_year:
+    name: HEMS Powerwall Avoided Import Value This Year
+    source: sensor.hems_powerwall_avoided_import_value_since_tracking
+    cycle: yearly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_energy_today:
+    name: HEMS Powerwall Avoided Import Energy Today
+    source: sensor.hems_powerwall_avoided_import_energy_since_tracking
+    cycle: daily
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_energy_this_week:
+    name: HEMS Powerwall Avoided Import Energy This Week
+    source: sensor.hems_powerwall_avoided_import_energy_since_tracking
+    cycle: weekly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_energy_this_month:
+    name: HEMS Powerwall Avoided Import Energy This Month
+    source: sensor.hems_powerwall_avoided_import_energy_since_tracking
+    cycle: monthly
+    periodically_resetting: false
+
+  hems_powerwall_avoided_import_energy_this_year:
+    name: HEMS Powerwall Avoided Import Energy This Year
+    source: sensor.hems_powerwall_avoided_import_energy_since_tracking
+    cycle: yearly
     periodically_resetting: false

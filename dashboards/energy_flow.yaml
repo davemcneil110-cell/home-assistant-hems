@@ -132,7 +132,7 @@ views:
                 subtract_individual: true
                 color_icon: true
               individual:
-                - entity: sensor.solaredge_ev_charger_ev_charger_power
+                - entity: sensor.hems_effective_ev_charging_power
                   name: BYD Atto 3
                   icon: mdi:car-electric
                   color: "#42a5f5"
@@ -678,6 +678,30 @@ views:
             tap_action:
               action: more-info
 
+          - type: tile
+            entity: sensor.hems_solar_average_savings_selected_period
+            name: Solar Average Saving
+            icon: mdi:solar-power-variant
+            color: amber
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_average_savings_selected_period
+            name: Powerwall Average Net Benefit
+            icon: mdi:home-battery
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_powerwall_average_avoided_grid_price_selected_period
+            name: Powerwall Average Avoided Grid Price
+            icon: mdi:transmission-tower-off
+            color: green
+            tap_action:
+              action: more-info
+
       - type: grid
         column_span: 2
         cards:
@@ -828,3 +852,286 @@ views:
               Live tracking began when the savings package was installed. Grid supplied directly to the house or EV is not counted as a saving. Negative feed-in and Powerwall grid-charging costs reduce the relevant live result.
 
               The combined figure is an **asset-attributed benefit**. Solar captured into the Powerwall is credited to Solar, while avoided import when that energy is later discharged is credited to the Powerwall.
+
+  - title: Intelligence
+    path: intelligence
+    icon: mdi:brain
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: HEMS Intelligence
+            icon: mdi:brain
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              ## {{ states('sensor.hems_reliability_summary') | replace('_', ' ') | title }}
+
+              **Data quality:** {{ states('sensor.hems_critical_data_quality') | replace('_', ' ') | title }} · {{ state_attr('sensor.hems_critical_data_quality', 'quality_score') | default('unknown', true) }}%
+
+              **Workers:** {{ states('sensor.hems_worker_enablement') | replace('_', ' ') | title }}<br>
+              **Savings confidence:** {{ states('sensor.hems_savings_confidence') | replace('_', ' ') | title }} after {{ states('sensor.hems_observability_tracking_days') }} tracked days<br>
+              **Last daily result:** {{ states('input_text.hems_last_daily_summary_status') | replace('_', ' ') | title }}
+
+          - type: tile
+            entity: sensor.hems_reliability_summary
+            name: Overall Reliability
+            icon: mdi:shield-home-outline
+            color: green
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_critical_data_quality
+            name: Critical Data Quality
+            icon: mdi:database-check-outline
+            color: blue
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_worker_enablement
+            name: Worker Enablement
+            icon: mdi:robot-industrial-outline
+            color: teal
+            tap_action:
+              action: more-info
+
+          - type: tile
+            entity: sensor.hems_savings_confidence
+            name: Savings Confidence
+            icon: mdi:chart-timeline-variant
+            color: amber
+            tap_action:
+              action: more-info
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Solar Forecast Learning
+            icon: mdi:weather-partly-cloudy
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            update_interval: 5min
+            graph_span: 30d
+            span:
+              end: day
+            header:
+              show: true
+              title: Morning Forecast vs Actual — 30 Days
+              show_states: true
+              colorize_states: true
+            apex_config:
+              chart:
+                height: 300px
+              legend:
+                show: true
+                position: bottom
+              yaxis:
+                min: 0
+                title:
+                  text: kWh
+            series:
+              - entity: input_number.hems_last_solar_actual
+                name: Actual
+                color: "#f9c74f"
+                type: column
+                float_precision: 1
+                group_by:
+                  func: last
+                  duration: 1d
+              - entity: input_number.hems_last_solar_forecast_central
+                name: Central forecast
+                color: "#42a5f5"
+                type: line
+                float_precision: 1
+                stroke_width: 2
+                group_by:
+                  func: last
+                  duration: 1d
+              - entity: input_number.hems_last_solar_forecast_conservative
+                name: Conservative forecast
+                color: "#90a4ae"
+                type: line
+                float_precision: 1
+                stroke_width: 2
+                group_by:
+                  func: last
+                  duration: 1d
+
+          - type: entities
+            title: Forecast Learning Detail
+            show_header_toggle: false
+            entities:
+              - entity: input_number.hems_last_solar_actual
+                name: Last actual production
+              - entity: input_number.hems_last_solar_forecast_central
+                name: Last central forecast
+              - entity: sensor.hems_last_solar_forecast_error_percent
+                name: Last forecast error
+              - entity: sensor.hems_last_solar_forecast_accuracy
+                name: Last forecast accuracy
+              - entity: sensor.hems_solar_forecast_ratio_7_day
+                name: Actual / forecast — 7 day
+              - entity: sensor.hems_solar_forecast_ratio_30_day
+                name: Actual / forecast — 30 day
+              - entity: sensor.hems_suggested_solar_forecast_multiplier
+                name: Suggested forecast multiplier
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Overnight Learning
+            icon: mdi:weather-night
+
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            update_interval: 5min
+            graph_span: 30d
+            span:
+              end: day
+            header:
+              show: true
+              title: Overnight Household Energy — 30 Days
+              show_states: true
+              colorize_states: true
+            apex_config:
+              chart:
+                height: 300px
+              legend:
+                show: true
+                position: bottom
+              yaxis:
+                min: 0
+                title:
+                  text: kWh
+            series:
+              - entity: input_number.hems_overnight_usage
+                name: Recorded night
+                color: "#7e57c2"
+                type: column
+                float_precision: 1
+                group_by:
+                  func: last
+                  duration: 1d
+              - entity: sensor.hems_overnight_usage_7_day
+                name: 7-day mean
+                color: "#42a5f5"
+                type: line
+                float_precision: 1
+                stroke_width: 2
+              - entity: sensor.hems_overnight_usage_30_day
+                name: 30-day mean
+                color: "#66bb6a"
+                type: line
+                float_precision: 1
+                stroke_width: 2
+
+          - type: entities
+            title: Overnight Recommendation
+            show_header_toggle: false
+            entities:
+              - entity: input_number.hems_overnight_usage
+                name: Latest overnight usage
+              - entity: input_number.hems_overnight_usage_average
+                name: Existing learned average
+              - entity: sensor.hems_overnight_usage_7_day
+                name: Rolling 7-day mean
+              - entity: sensor.hems_overnight_usage_30_day
+                name: Rolling 30-day mean
+              - entity: input_number.hems_overnight_reserve_safety_margin
+                name: Safety margin
+              - entity: input_number.hems_powerwall_usable_capacity
+                name: Usable Powerwall capacity
+              - entity: sensor.hems_adaptive_overnight_powerwall_recommendation
+                name: Advisory overnight target
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Worker and Sensor Health
+            icon: mdi:heart-pulse
+
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: sensor.energy_brain_guardian
+                name: Powerwall Guardian
+              - entity: sensor.hems_ev_guardian
+                name: EV Guardian
+              - entity: sensor.hems_ev_worker_command_guard
+                name: EV Command Guard
+              - entity: sensor.hems_solar_guardian
+                name: Solar Guardian
+              - entity: sensor.hems_native_excess_supervisor
+                name: Native Excess Supervisor
+              - entity: sensor.hems_ev_powerwall_interlock_status
+                name: EV / Powerwall Interlock
+              - entity: sensor.hems_charging_deadline_feasibility
+                name: Charging Deadline
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              ### Data-quality detail
+
+              **Unavailable critical entities:** {{ state_attr('sensor.hems_critical_data_quality', 'unavailable_entities') | default('none', true) }}
+
+              **Disabled workers:** {{ state_attr('sensor.hems_worker_enablement', 'disabled_workers') | default('none', true) }}
+
+              This panel is observational. It reports a fault or disabled worker but does not change a device or re-enable an automation.
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Daily Summary
+            icon: mdi:clipboard-text-clock-outline
+
+          - type: tile
+            entity: input_boolean.hems_daily_summary_notifications_enabled
+            name: Daily Summary to Dave
+            icon: mdi:message-badge-outline
+            color: blue
+
+          - type: tile
+            entity: input_datetime.hems_daily_summary_time
+            name: Summary Time
+            icon: mdi:clock-check-outline
+            color: blue
+
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: input_datetime.hems_last_daily_summary
+                name: Last summary sent
+              - entity: input_text.hems_last_daily_summary_status
+                name: Last result
+              - entity: sensor.hems_observability_tracking_days
+                name: Tracked days
+
+          - type: markdown
+            grid_options:
+              columns: full
+            content: |-
+              ### Confidence guide
+
+              - **Initial:** fewer than 7 days
+              - **Early:** 7–29 days
+              - **Developing:** 30–89 days
+              - **Seasonal partial:** 90–179 days
+              - **Mature:** 180 days or more
+
+              Solar and Powerwall averages will move noticeably at first. Seasonal planning should rely on the longer periods rather than a few unusually sunny, cloudy, cheap, or expensive days.

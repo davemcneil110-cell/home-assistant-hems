@@ -62,6 +62,8 @@ triggers:
       - input_boolean.hems_test_solar_finished
   - trigger: time_pattern
     seconds: /15
+  - trigger: homeassistant
+    event: start
 conditions: []
 actions:
   - variables:
@@ -71,6 +73,16 @@ actions:
       session_active: >-
         {{ is_state('input_boolean.hems_ev_worker_session_active', 'on') }}
       session_type: "{{ states('input_select.hems_ev_worker_session_type') }}"
+      last_command_age: >-
+        {% set last_command = as_timestamp(
+          states('input_datetime.hems_ev_worker_last_command'),
+          default=none
+        ) %}
+        {% if last_command is none %}
+          999999
+        {% else %}
+          {{ ([as_timestamp(now()) - last_command, 0] | max) | int(0) }}
+        {% endif %}
       connected: >-
         {{
           is_state(
@@ -265,6 +277,47 @@ actions:
           )
         }}
   - choose:
+      # Home Assistant restores input helpers across a restart. Recover an
+      # abandoned non-idle command when there is no Worker-owned session and
+      # fused telemetry confirms the EV is not charging. The existing cooldown
+      # then provides a quiet two-minute settling period before a new session
+      # can be claimed. No charger command is sent by this recovery branch.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                not session_active
+                and charging_state == 'off'
+                and (last_command_age | int(0)) >= 720
+                and command_state in [
+                  'start_pending',
+                  'running',
+                  'stop_pending',
+                  'cooldown',
+                  'interlock_lost_waiting_stop',
+                  'protective_stop_pending'
+                ]
+              }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.hems_ev_worker_session_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: cooldown
+
       # A deliberate manual takeover never causes the Worker to fight the user.
       # Release ownership and enter cooldown without pressing Start or Stop.
       - conditions:
@@ -890,7 +943,6 @@ actions:
                 and command_guard == 'READY'
                 and connected
                 and charging_state == 'off'
-                and states('sensor.ev_charging_availability') == 'READY'
                 and permission in [
                   'ALLOW_CHEAP_GRID',
                   'EV_URGENT_START_TO_50',

@@ -60,7 +60,19 @@ read-only sensors and test platform have been commissioned.
 - Amber advanced price forecasting
 - Solcast forecast snapshots and forecast learning
 - financial tracking, energy attribution and estimated system savings
+- daily performance summaries, critical-data checks and Worker health reporting
+- rolling 7/30-day solar-forecast and overnight-usage learning
 - commissioning and visual energy-flow dashboards
+
+## Optional observation package
+
+[`packages/observability_learning.yaml`](packages/observability_learning.yaml)
+adds read-only reliability, data-quality, forecast-learning, overnight-learning
+and savings-confidence entities. It also records one daily snapshot and creates
+one Home Assistant persistent notification. It never calls a hardware-control
+service. The `Intelligence` view in
+[`dashboards/energy_flow.yaml`](dashboards/energy_flow.yaml) displays these
+entities.
 
 ## Privacy boundary
 

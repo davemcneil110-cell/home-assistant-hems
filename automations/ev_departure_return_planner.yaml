@@ -39,21 +39,17 @@ triggers:
 conditions: []
 actions:
   - choose:
-      # A persistent Until Target/Until Full commitment remains in the plan
-      # after arrival. Ordinary arrivals clear any stale return marker.
+      # A confirmed return always fulfils and clears the current trip marker.
+      # Recovery approval is a separate charge commitment and must not prevent
+      # the next departure from receiving a fresh return-plan decision.
       - conditions:
           - condition: template
             value_template: >-
               {{ trigger.id in ['returned_ready', 'returned_charging'] }}
         sequence:
-          - if:
-              - condition: state
-                entity_id: input_boolean.hems_ev_recovery_approved
-                state: "off"
-            then:
-              - action: input_boolean.turn_off
-                target:
-                  entity_id: input_boolean.ev_expected_back_today
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.ev_expected_back_today
           - action: notify.mobile_app_primary_phone
             continue_on_error: true
             data:
@@ -294,17 +290,19 @@ actions:
                 {% set value = reply_text | trim | upper
                   | replace(' ', '') | replace('.', ':') %}
                 {% set ns = namespace(parsed=none) %}
-                {% for format in [
-                  '%H:%M',
-                  '%H%M',
-                  '%I:%M%p',
-                  '%I%M%p',
-                  '%I%p'
-                ] %}
-                  {% if ns.parsed is none %}
-                    {% set ns.parsed = strptime(value, format, none) %}
-                  {% endif %}
-                {% endfor %}
+                {% set has_meridiem = value.endswith('AM')
+                  or value.endswith('PM') %}
+                {% set body = value[:-2] if has_meridiem else value %}
+                {% if has_meridiem %}
+                  {% set format = '%I:%M%p' if ':' in body
+                    else '%I%p' if body | length <= 2
+                    else '%I%M%p' %}
+                {% else %}
+                  {% set format = '%H:%M' if ':' in body
+                    else '%H' if body | length <= 2
+                    else '%H%M' %}
+                {% endif %}
+                {% set ns.parsed = strptime(value, format, none) %}
                 {{ ns.parsed.strftime('%H:%M:%S')
                   if ns.parsed is not none else '' }}
           - action: notify.mobile_app_primary_phone

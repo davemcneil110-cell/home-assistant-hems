@@ -1,7 +1,7 @@
-alias: HEMS - EV 30-50 Charge Choice
+alias: HEMS - EV Above-30 Charge Choice
 description: >-
   When either the BYD or SolarEdge integration confirms that the EV is plugged
-  in while its SOC is above 30% and at or below 50%, asks primary user and secondary EV user
+  in while its SOC is above 30% and below today's target, asks primary user and secondary EV user
   whether to keep normal solar/cheap-grid planning or charge immediately. A
   Charge now response opens a second choice: until unplugged, until today's
   target, or until full. The first phone response wins at each stage. The
@@ -69,7 +69,6 @@ actions:
         is_number(soc)
         and is_number(target)
         and (soc | float) > 30
-        and (soc | float) <= 50
         and (soc | float) < (target | float)
         and is_state('input_boolean.hems_ev_recovery_approved', 'off')
       }}
@@ -178,6 +177,16 @@ actions:
         event_data:
           action: HEMS_EV_DECIDE_LATER
         id: decide_later
+      - trigger: template
+        value_template: >-
+          {{
+            is_state('binary_sensor.atto_3_plug', 'off')
+            and is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+              'off'
+            )
+          }}
+        id: unplugged
     timeout: "01:00:00"
     continue_on_timeout: true
 
@@ -296,6 +305,16 @@ actions:
                 event_data:
                   action: HEMS_EV_UNTIL_FULL
                 id: until_full
+              - trigger: template
+                value_template: >-
+                  {{
+                    is_state('binary_sensor.atto_3_plug', 'off')
+                    and is_state(
+                      'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                      'off'
+                    )
+                  }}
+                id: unplugged
             timeout: "01:00:00"
             continue_on_timeout: true
 

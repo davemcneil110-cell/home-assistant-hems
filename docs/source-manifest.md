@@ -12,7 +12,7 @@ Only the listed current files are candidates for the first alpha release.
 - Powerwall Worker: `HEMS_Powerwall_Worker_2026-07-22.yaml`
 - Solar Worker: `HEMS_Solar_Worker_30_Minute_Hold_UI_Full_Replacement_2026-07-26.yaml`
 - Financial Worker: `financial_worker.yaml`
-- EV 30–50% decision: `HEMS_EV_30_50_Charge_Choice_UI_Full_Replacement_2026-07-23.yaml`
+- EV above-30% decision (while below today's target): `HEMS_EV_30_50_Charge_Choice_UI_Full_Replacement_2026-07-23.yaml`
 - EV departure/return planner: `HEMS_EV_Departure_Return_Planner_UI_Full_Replacement_2026-07-23.yaml`
 - EV commitment reset: `HEMS_EV_Charge_Commitment_Reset_UI_Full_Replacement_2026-07-23.yaml`
 - EV Powerwall hold latch: `HEMS_EV_Powerwall_Hold_Latch_UI_Full_Replacement_2026-07-23.yaml`
