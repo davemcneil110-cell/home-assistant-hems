@@ -1,7 +1,9 @@
 {% set capacity_kwh = 60.4 %}
 {% set availability = states('sensor.ev_charging_availability') %}
-{% set ev_connected = availability in ['READY', 'CHARGING'] %}
-{% set ev_expected_back = is_state(
+{% set context = states('sensor.hems_ev_charging_context') %}
+{% set external_charging = context == 'EXTERNAL_CHARGING' %}
+{% set ev_connected = context in ['HOME_CONNECTED', 'HOME_CHARGING'] %}
+{% set ev_expected_back = not external_charging and is_state(
     'input_boolean.ev_expected_back_today',
     'on'
   ) %}

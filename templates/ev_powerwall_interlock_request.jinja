@@ -1,5 +1,51 @@
+{# Full state template. Revised 2026-08-12. #}
+{#
+  IMPORTANT: SolarEdge's charger_charging binary sensor can remain ON while no
+  energy is moving. Native-session ownership therefore uses BYD charging or
+  measured SolarEdge charger power as the authoritative transfer evidence.
+#}
+{% set supervisor_state = states(
+  'input_select.hems_native_excess_supervisor_state'
+) %}
+{% set supervisor_enabled = is_state(
+  'input_boolean.hems_native_excess_supervisor_enabled', 'on'
+) %}
+{% set native_hold_states = [
+  'native_excess_hold',
+  'native_deficit_confirming',
+  'native_excess_resumed',
+  'stop_ack_timeout'
+] %}
+
 {% set active = states('input_boolean.hems_ev_worker_session_active') %}
 {% set session_type = states('input_select.hems_ev_worker_session_type') %}
+{% set charger_connected = is_state(
+  'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+) %}
+{% set charger_power_raw = states(
+  'sensor.solaredge_ev_charger_ev_charger_power'
+) %}
+{% set actual_ev_energy_transfer =
+  is_state('binary_sensor.atto_3_charging', 'on')
+  or (is_number(charger_power_raw) and charger_power_raw | float > 0.5) %}
+{% set native_enabled = is_state(
+  'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+) and states(
+  'sensor.solaredge_ev_charger_ev_excess_solar_status'
+) | lower == 'enabled' %}
+{% set no_test_mode =
+  is_state('input_boolean.hems_test_mode', 'off')
+  and is_state('input_boolean.hems_test_ev_away', 'off')
+  and is_state('input_boolean.hems_test_ev_home_plugged_low_soc', 'off')
+  and is_state('input_boolean.hems_test_powerwall_low', 'off') %}
+{% set observed_unowned_native_session =
+  supervisor_enabled
+  and active == 'off'
+  and charger_connected
+  and actual_ev_energy_transfer
+  and native_enabled
+  and no_test_mode
+  and is_state('input_boolean.hems_ev_manual_override', 'off') %}
 {% set simultaneous = states(
   'input_boolean.hems_simultaneous_grid_charging_allowed'
 ) %}
@@ -31,6 +77,9 @@
 {% set updated = as_datetime(states(
   'input_datetime.hems_advanced_forecast_last_updated'
 ), none) %}
+{% set latest_safe_start = as_datetime(states(
+  'sensor.hems_powerwall_latest_safe_grid_start'
+), none) %}
 
 {% set target_time_raw = states('input_datetime.hems_charging_target_time') %}
 {% set target_time = target_time_raw
@@ -38,7 +87,6 @@
     else '14:30:00' %}
 {% set deadline = today_at(target_time) %}
 {% set deadline_timestamp = as_timestamp(deadline) %}
-{% set midday_timestamp = as_timestamp(today_at('12:00:00')) %}
 {% set now_timestamp = as_timestamp(now()) %}
 
 {% set price_inputs_valid = is_number(current_price_raw)
@@ -87,8 +135,10 @@
   {% set feasibility_valid = false %}
 {% endif %}
 
+{% set before_dynamic_hold_boundary = latest_safe_start is not none
+    and now() < latest_safe_start %}
 {% set early_discharge_allowed =
-    now_timestamp < midday_timestamp
+    before_dynamic_hold_boundary
     and not current_cheap
     and forecast_status_valid
     and cache_fresh
@@ -101,7 +151,18 @@
     and is_state('input_boolean.automatic_grid_charging_enabled', 'on')
     and is_state('input_boolean.hems_powerwall_manual_override', 'off') %}
 
-{% if active not in ['on', 'off'] %}
+{% if observed_unowned_native_session %}
+  REQUEST_NATIVE_EXCESS_HOLD_100
+
+{% elif supervisor_enabled and supervisor_state in native_hold_states %}
+  REQUEST_NATIVE_EXCESS_HOLD_100
+
+{% elif supervisor_enabled and supervisor_state in [
+  'house_priority_released', 'surplus_recovery_confirming'
+] %}
+  NO_REQUEST
+
+{% elif active not in ['on', 'off'] %}
   INPUT_UNAVAILABLE
 
 {% elif active == 'off' %}
@@ -123,11 +184,6 @@
   {% endif %}
 
 {% elif session_type == 'urgent_recovery' %}
-  {# Below 30% the EV must charge to its 50% recovery minimum. Before the
-     fixed midday boundary, permit the Powerwall to remain in self-consumption only
-     when the verified Amber horizon contains enough later cheap-grid time to
-     recover both active targets with a 30-minute margin. Once cheap grid is
-     actually present, coordinate simultaneous charging when allowed. #}
   {% if current_cheap and simultaneous == 'on' %}
     REQUEST_CHEAP_GRID_CHARGE_AND_HOLD
   {% elif current_cheap and simultaneous == 'off' %}

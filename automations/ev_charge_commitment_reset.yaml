@@ -1,9 +1,11 @@
 alias: HEMS - EV Charge Commitment Reset
 description: >-
-  Clears an approved EV charge-now commitment after its active target is
-  confirmed for one minute. At 00:05 it also starts a clean daily plan and
-  resets Long Drive Today. This automation only updates HEMS planning helpers
-  and never controls hardware.
+  Resets temporary EV planning helpers when their purpose has finished. The
+  connection charge plan is deliberately retained through Home Assistant and
+  automation reloads and is reset only after both BYD and SolarEdge plug
+  sensors have continuously confirmed unplugged for five minutes. This
+  automation only updates HEMS planning helpers and notifications; it never
+  controls hardware.
 triggers:
   - trigger: template
     value_template: >-
@@ -18,34 +20,192 @@ triggers:
     for: "00:01:00"
     id: target_met
   - trigger: time
+    at: input_datetime.hems_charging_target_time
+    id: target_time_reached
+  - trigger: template
+    value_template: >-
+      {{
+        is_state('input_boolean.ev_expected_back_today', 'on')
+        and states('sensor.ev_charging_availability') in ['READY', 'CHARGING']
+      }}
+    for: "00:01:00"
+    id: expected_return_fulfilled
+  - trigger: template
+    value_template: >-
+      {{
+        is_state('binary_sensor.atto_3_plug', 'off')
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+          'off'
+        )
+      }}
+    for: "00:05:00"
+    id: connection_ended
+  - trigger: time
     at: "00:05:00"
     id: daily_reset
+  - trigger: time_pattern
+    minutes: "/5"
+    id: reconcile
 conditions: []
 actions:
-  - action: input_boolean.turn_off
-    target:
-      entity_id:
-        - input_boolean.hems_ev_recovery_approved
-        - input_boolean.ev_expected_back_today
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'daily_reset' }}"
-        sequence:
-          - action: input_boolean.turn_off
-            target:
-              entity_id: input_boolean.hems_ev_long_drive_today
-  - action: notify.mobile_app_primary_phone
-    continue_on_error: true
-    data:
-      message: clear_notification
-      data:
-        tag: hems_ev_30_50_choice
-  - action: notify.mobile_app_secondary_ev_phone
-    continue_on_error: true
-    data:
-      message: clear_notification
-      data:
-        tag: hems_ev_30_50_choice
+  - variables:
+      both_unplugged: >-
+        {{
+          is_state('binary_sensor.atto_3_plug', 'off')
+          and is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+            'off'
+          )
+        }}
+      both_unplugged_for_five_minutes: >-
+        {{
+          is_state('binary_sensor.atto_3_plug', 'off')
+          and is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+            'off'
+          )
+          and (
+            as_timestamp(now())
+            - as_timestamp(
+              states['binary_sensor.atto_3_plug'].last_changed,
+              as_timestamp(now())
+            )
+          ) >= 300
+          and (
+            as_timestamp(now())
+            - as_timestamp(
+              states[
+                'binary_sensor.solaredge_ev_charger_ev_charger_connected'
+              ].last_changed,
+              as_timestamp(now())
+            )
+          ) >= 300
+        }}
+  - variables:
+      recovery_should_clear: >-
+        {% set soc = states('sensor.hems_effective_ev_soc') %}
+        {% set target = states('sensor.hems_ev_target_today') %}
+        {% set configured = states('input_datetime.hems_charging_target_time') %}
+        {% set target_time = configured
+            if configured not in ['unknown', 'unavailable', 'none', '']
+            else '14:30:00' %}
+        {{
+          is_state('input_boolean.hems_ev_recovery_approved', 'on')
+          and (
+            trigger.id in [
+              'target_met',
+              'target_time_reached',
+              'connection_ended',
+              'daily_reset'
+            ]
+            or (
+              trigger.id == 'reconcile'
+              and (
+                (is_number(soc) and is_number(target)
+                  and (soc | float) >= (target | float))
+                or now() >= today_at(target_time)
+                or (both_unplugged | bool)
+              )
+            )
+          )
+        }}
+      expected_back_should_clear: >-
+        {{
+          is_state('input_boolean.ev_expected_back_today', 'on')
+          and (
+            trigger.id in [
+              'expected_return_fulfilled',
+              'daily_reset'
+            ]
+            or (
+              trigger.id == 'reconcile'
+              and states('sensor.ev_charging_availability')
+                in ['READY', 'CHARGING']
+            )
+          )
+        }}
+      connection_plan_should_reset: >-
+        {{
+          states('input_select.hems_ev_connection_charge_plan')
+            != 'Unanswered'
+          and (
+            trigger.id == 'connection_ended'
+            or (
+              trigger.id == 'reconcile'
+              and (both_unplugged_for_five_minutes | bool)
+            )
+          )
+        }}
+  - variables:
+      cleanup_happened: >-
+        {{
+          (recovery_should_clear | bool)
+          or (expected_back_should_clear | bool)
+          or (connection_plan_should_reset | bool)
+          or trigger.id == 'daily_reset'
+        }}
+  - if:
+      - condition: template
+        value_template: "{{ recovery_should_clear | bool }}"
+    then:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.hems_ev_recovery_approved
+  - if:
+      - condition: template
+        value_template: "{{ expected_back_should_clear | bool }}"
+    then:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ev_expected_back_today
+  - if:
+      - condition: template
+        value_template: "{{ connection_plan_should_reset | bool }}"
+    then:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.hems_ev_connection_charge_plan
+        data:
+          option: Unanswered
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id == 'daily_reset' }}"
+    then:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.hems_ev_long_drive_today
+  - if:
+      - condition: template
+        value_template: "{{ cleanup_happened | bool }}"
+    then:
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_30_50_choice
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_30_50_choice
+  - if:
+      - condition: template
+        value_template: "{{ connection_plan_should_reset | bool }}"
+    then:
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_connection_charge_plan
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_connection_charge_plan
 mode: single
 max_exceeded: silent

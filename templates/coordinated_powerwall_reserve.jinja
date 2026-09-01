@@ -1,19 +1,36 @@
-{# Full state template. Revised 2026-07-31.
-   Teslemetry did not retain a 99% reserve during live commissioning, so only
-   that unstable request is normalised to the supported 100% endpoint. #}
+{# Full state template. Revised 2026-09-01.
+   Native post-target excess always holds 100%. Brain holds use the planned
+   current-SOC reserve, while charge plans raise reserve to the target. The
+   solar SOC cycle owns an independent floor and never releases that floor
+   during RECOVERY. #}
 {% set coordinated_mode = states('sensor.hems_coordinated_powerwall_mode') %}
 {% set interlock = states('sensor.hems_ev_powerwall_interlock_request') %}
 {% set hold_raw = states('sensor.hems_ev_powerwall_hold_reserve') %}
-{% set target_raw = states('input_number.powerwall_target') %}
+{% set brain_reserve_raw = states('sensor.hems_powerwall_brain_reserve') %}
 {% set minimum_raw = states('input_number.minimum_power_reserve') %}
+{% set target_raw = states('input_number.powerwall_target') %}
+{% set cycle_floor_raw = states(
+  'input_number.hems_solar_powerwall_soc_cycle_floor'
+) %}
+{% set protection_time_raw = states(
+  'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+) %}
+{% set protection_active = protection_time_raw not in [
+  'unknown', 'unavailable', 'none', ''
+] and as_timestamp(now()) >= as_timestamp(today_at(protection_time_raw)) %}
+{% set cycle_phase = states(
+  'input_select.hems_solar_powerwall_soc_cycle_phase'
+) %}
+{% set cycle_live = is_state(
+  'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled', 'on'
+) and cycle_phase in ['DISCHARGE', 'RECOVERY'] %}
 {% set actual_soc_raw = states(
   'sensor.house_home_energy_gateway_teslemetry_percentage_charged'
 ) %}
 {% set request_entity = states.sensor.hems_ev_powerwall_interlock_request %}
 {% if request_entity is not none %}
   {% set request_age_seconds = [
-      as_timestamp(now()) - as_timestamp(request_entity.last_changed),
-      0
+      as_timestamp(now()) - as_timestamp(request_entity.last_changed), 0
     ] | max %}
 {% else %}
   {% set request_age_seconds = 99999 %}
@@ -22,24 +39,48 @@
 {% if not is_number(minimum_raw) %}
   unknown
 
+{% elif interlock == 'REQUEST_NATIVE_EXCESS_HOLD_100' %}
+  100
+
 {% elif interlock == 'REQUEST_EARLY_FLEXIBLE_DISCHARGE' %}
   {% set requested = minimum_raw | float %}
-  {% set bounded = [[requested, 0] | max, 100] | min %}
-  {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+  {{ [[requested, 0] | max, 100] | min | round(0) }}
+
+{% elif cycle_live and interlock == 'NO_REQUEST'
+      and cycle_phase == 'DISCHARGE' %}
+  {% if not is_number(cycle_floor_raw) %}
+    unknown
+  {% else %}
+    {% set requested = [cycle_floor_raw | float, minimum_raw | float] | max %}
+    {% if protection_active and is_number(target_raw) %}
+      {% set requested = [requested, target_raw | float] | max %}
+    {% endif %}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
+  {% endif %}
+
+{% elif cycle_live and interlock == 'NO_REQUEST'
+      and cycle_phase == 'RECOVERY' %}
+  {% if not is_number(cycle_floor_raw) %}
+    unknown
+  {% else %}
+    {% set requested = [cycle_floor_raw | float, minimum_raw | float] | max %}
+    {% if protection_active and is_number(target_raw)
+          and is_number(actual_soc_raw) %}
+      {% set recovered = [actual_soc_raw | float, target_raw | float] | min %}
+      {% set requested = [requested, recovered] | max %}
+    {% endif %}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
+  {% endif %}
 
 {% elif interlock == 'REQUEST_APPROVED_HOLD_ONLY' %}
-  {# On the transition into hold, use the live real SOC immediately. The
-     companion latch stores the same value for the steady-state hold. #}
   {% if request_age_seconds <= 15 and is_number(actual_soc_raw) %}
     {% set requested = [actual_soc_raw | float, minimum_raw | float] | max %}
-    {% set bounded = [[requested, 0] | max, 100] | min %}
-    {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
   {% elif not is_number(hold_raw) %}
     unknown
   {% else %}
     {% set requested = [hold_raw | float, minimum_raw | float] | max %}
-    {% set bounded = [[requested, 0] | max, 100] | min %}
-    {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
   {% endif %}
 
 {% elif interlock in [
@@ -51,24 +92,17 @@
     unknown
   {% else %}
     {% set requested = [hold_raw | float, minimum_raw | float] | max %}
-    {% set bounded = [[requested, 0] | max, 100] | min %}
-    {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
-  {% endif %}
-
-{% elif interlock == 'NO_REQUEST' and coordinated_mode == 'backup' %}
-  {% if not is_number(target_raw) %}
-    unknown
-  {% else %}
-    {% set requested = target_raw | float %}
-    {% set bounded = [[requested, 0] | max, 100] | min %}
-    {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
   {% endif %}
 
 {% elif interlock == 'NO_REQUEST'
-      and coordinated_mode == 'self_consumption' %}
-  {% set requested = minimum_raw | float %}
-  {% set bounded = [[requested, 0] | max, 100] | min %}
-  {{ 100 if (bounded | round(0) | int) == 99 else (bounded | round(0)) }}
+      and coordinated_mode in ['backup', 'self_consumption'] %}
+  {% if not is_number(brain_reserve_raw) %}
+    unknown
+  {% else %}
+    {% set requested = brain_reserve_raw | float %}
+    {{ [[requested, 0] | max, 100] | min | round(0) }}
+  {% endif %}
 
 {% else %}
   unknown

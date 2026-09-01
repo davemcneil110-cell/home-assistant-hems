@@ -13,6 +13,14 @@
 # - sensor.hems_effective_battery_power: positive discharge, negative charge (kW)
 # - sensor.hems_effective_solar_power: positive generation (kW)
 # - sensor.house_home_energy_gateway_teslemetry_load_power includes EV load (kW)
+#
+# EV charging is deliberately separated by location:
+# - SolarEdge connected ON: home charging may participate in household energy
+#   attribution and remains capped at the 7.5 kW home-charger maximum.
+# - SolarEdge connected OFF plus BYD charging ON: external charging is displayed
+#   up to 100 kW but never participates in home solar/grid/Powerwall attribution.
+# BYD telemetry may measure charging power, but it never establishes a home
+# connection by itself.
 
 input_select:
   hems_energy_source_view:
@@ -71,6 +79,112 @@ template:
         state: >-
           {{ [states('sensor.hems_effective_battery_power') | float(0), 0] | max | round(4) }}
 
+      # Home EV charging power ----------------------------------------------
+      # Keep this established entity ID as the home-only value consumed by all
+      # existing source-to-destination calculations.
+      - name: HEMS Effective EV Charging Power
+        unique_id: hems_effective_ev_charging_power
+        icon: mdi:ev-station
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set home_connected = is_state(
+               'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on') %}
+          {% set charger_charging =
+               is_state('binary_sensor.solaredge_ev_charger_ev_charger_charging', 'on') %}
+          {% set vehicle_charging = is_state('binary_sensor.atto_3_charging', 'on') %}
+          {% set direct =
+               [states('sensor.solaredge_ev_charger_ev_charger_power') | float(0), 0] | max %}
+          {% set derived =
+               [states('sensor.hems_ev_charging_power_from_session_energy') | float(0), 0] | max %}
+          {% set vehicle =
+               [states('sensor.atto_3_battery_power') | float(0) / 1000, 0] | max %}
+          {% set charging = home_connected and (
+               charger_charging
+               or vehicle_charging
+               or direct >= 0.05
+               or derived >= 0.05) %}
+          {% if not home_connected or not charging %}
+            0
+          {% elif direct >= 0.05 %}
+            {{ [direct, 7.5] | min | round(3) }}
+          {% elif derived >= 0.05 %}
+            {{ [derived, 7.5] | min | round(3) }}
+          {% elif vehicle >= 0.05 %}
+            {{ [vehicle, 7.5] | min | round(3) }}
+          {% else %}
+            0
+          {% endif %}
+
+      # External EV charging power ------------------------------------------
+      # This is display-only telemetry. It must never be used as a destination
+      # on the home's shared AC bus.
+      - name: HEMS External EV Charging Power
+        unique_id: hems_external_ev_charging_power
+        icon: mdi:ev-station
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set home_connection_state = states(
+               'binary_sensor.solaredge_ev_charger_ev_charger_connected') %}
+          {% set vehicle_charging = is_state('binary_sensor.atto_3_charging', 'on') %}
+          {% set vehicle =
+               [states('sensor.atto_3_battery_power') | float(0) / 1000, 0] | max %}
+          {% if home_connection_state == 'off' and vehicle_charging and vehicle >= 0.05 %}
+            {{ [vehicle, 100] | min | round(3) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: HEMS Total EV Charging Power
+        unique_id: hems_total_ev_charging_power
+        icon: mdi:car-electric
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        availability: >-
+          {{ has_value('sensor.hems_effective_ev_charging_power')
+             and has_value('sensor.hems_external_ev_charging_power') }}
+        state: >-
+          {% set home = states('sensor.hems_effective_ev_charging_power') | float(0) %}
+          {% set external = states('sensor.hems_external_ev_charging_power') | float(0) %}
+          {{ [home + external, 100] | min | round(3) }}
+
+      - name: HEMS EV Charging Context
+        unique_id: hems_ev_charging_context
+        icon: mdi:map-marker-path
+        state: >-
+          {% set home_connection_state = states(
+               'binary_sensor.solaredge_ev_charger_ev_charger_connected') %}
+          {% set home_charging = is_state(
+               'binary_sensor.solaredge_ev_charger_ev_charger_charging', 'on')
+               or states('sensor.solaredge_ev_charger_ev_charger_power') | float(0) >= 0.05
+               or states('sensor.hems_ev_charging_power_from_session_energy') | float(0) >= 0.05 %}
+          {% set vehicle_charging = is_state('binary_sensor.atto_3_charging', 'on') %}
+          {% if home_connection_state == 'on' and home_charging %}
+            HOME_CHARGING
+          {% elif home_connection_state == 'on' %}
+            HOME_CONNECTED
+          {% elif home_connection_state == 'off' and vehicle_charging %}
+            EXTERNAL_CHARGING
+          {% elif home_connection_state == 'off' %}
+            NOT_HOME_CONNECTED
+          {% else %}
+            TRANSITION
+          {% endif %}
+        attributes:
+          solaredge_connected: >-
+            {{ states('binary_sensor.solaredge_ev_charger_ev_charger_connected') }}
+          solaredge_charging: >-
+            {{ states('binary_sensor.solaredge_ev_charger_ev_charger_charging') }}
+          byd_charging: "{{ states('binary_sensor.atto_3_charging') }}"
+          home_power_kw: >-
+            {{ states('sensor.hems_effective_ev_charging_power') }}
+          external_power_kw: >-
+            {{ states('sensor.hems_external_ev_charging_power') }}
+
       # Destination-side power ----------------------------------------------
       - name: HEMS Energy Destination Home Power
         unique_id: hems_energy_destination_home_power
@@ -80,10 +194,10 @@ template:
         state_class: measurement
         availability: >-
           {{ has_value('sensor.house_home_energy_gateway_teslemetry_load_power')
-             and has_value('sensor.solaredge_ev_charger_ev_charger_power') }}
+             and has_value('sensor.hems_effective_ev_charging_power') }}
         state: >-
           {% set load = [states('sensor.house_home_energy_gateway_teslemetry_load_power') | float(0), 0] | max %}
-          {% set ev = [states('sensor.solaredge_ev_charger_ev_charger_power') | float(0), 0] | max %}
+          {% set ev = [states('sensor.hems_effective_ev_charging_power') | float(0), 0] | max %}
           {{ [load - [ev, load] | min, 0] | max | round(4) }}
 
       - name: HEMS Energy Destination EV Power
@@ -94,10 +208,10 @@ template:
         state_class: measurement
         availability: >-
           {{ has_value('sensor.house_home_energy_gateway_teslemetry_load_power')
-             and has_value('sensor.solaredge_ev_charger_ev_charger_power') }}
+             and has_value('sensor.hems_effective_ev_charging_power') }}
         state: >-
           {% set load = [states('sensor.house_home_energy_gateway_teslemetry_load_power') | float(0), 0] | max %}
-          {% set ev = [states('sensor.solaredge_ev_charger_ev_charger_power') | float(0), 0] | max %}
+          {% set ev = [states('sensor.hems_effective_ev_charging_power') | float(0), 0] | max %}
           {{ [ev, load] | min | round(4) }}
 
       - name: HEMS Energy Destination Powerwall Power
@@ -311,6 +425,17 @@ template:
           {{ (([sources, destinations] | min) * source / sources * destination / destinations) | round(4) if sources > 0 and destinations > 0 else 0 }}
 
 sensor:
+  # SolarEdge's live EV power entity can remain at 0 kW during native excess
+  # solar charging. Its session-energy counter still advances approximately
+  # every 30 seconds, so this provides a reliable averaged charging power.
+  - platform: derivative
+    source: sensor.solaredge_ev_charger_ev_session_energy
+    name: HEMS EV Charging Power From Session Energy
+    unique_id: hems_ev_charging_power_from_session_energy
+    unit_time: h
+    time_window: "00:01:30"
+    round: 3
+
   # The left Riemann method is appropriate for step-like power measurements.
   # max_sub_interval ensures energy continues accumulating while power is stable.
   - platform: integration

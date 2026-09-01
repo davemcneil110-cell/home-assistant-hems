@@ -1,9 +1,12 @@
 alias: HEMS - Charging Deadline Warning
 description: >-
   Sends one warning when the read-only charging feasibility sensor enters a
-  target-risk or incomplete EV-return-plan state. primary user receives every warning;
-  secondary EV user receives it only when an active EV shortfall or EV return decision is
-  involved.
+  target-risk or incomplete EV-return-plan state. The primary user receives every warning;
+  the secondary EV user receives it only when an active EV shortfall or EV return decision is
+  involved. A passed-deadline warning is evaluated only during the first 15
+  minutes after the configured charging target time and requires at least 1.0
+  kWh of active remaining shortfall. Later normal Powerwall discharge cannot
+  create a missed-target warning.
   Notifications are restricted to 06:30-21:30 local time. An overnight risk is
   rechecked at 06:30 and is sent only if it still exists. Warnings share a
   15-minute cooldown and use one stable, alert-once mobile notification. This
@@ -26,7 +29,11 @@ triggers:
     entity_id: sensor.hems_charging_deadline_feasibility
     to: WARNING_DEADLINE_PASSED_WITH_SHORTFALL
     for: "00:02:00"
-    id: deadline_passed
+    id: deadline_window
+
+  - trigger: time
+    at: input_datetime.hems_charging_target_time
+    id: deadline_evaluation
 
   - trigger: state
     entity_id: sensor.hems_charging_deadline_feasibility
@@ -84,7 +91,10 @@ actions:
           WARNING_NOT_ENOUGH_PHYSICAL_TIME
         {% elif trigger is defined and trigger.id == 'cheap_time' %}
           WARNING_NOT_ENOUGH_CHEAP_TIME
-        {% elif trigger is defined and trigger.id == 'deadline_passed' %}
+        {% elif trigger is defined and trigger.id in [
+          'deadline_window',
+          'deadline_evaluation'
+        ] %}
           WARNING_DEADLINE_PASSED_WITH_SHORTFALL
         {% elif trigger is defined and trigger.id == 'return_time_required' %}
           EV_RETURN_TIME_REQUIRED
@@ -98,6 +108,40 @@ actions:
           WARNING_EV_RETURN_WINDOW_TOO_SHORT
         {% else %}
           {{ states('sensor.hems_charging_deadline_feasibility') }}
+        {% endif %}
+
+      active_shortfall_kwh: >-
+        {% set pw_raw = states('sensor.powerwall_energy_required') %}
+        {% set ev_raw = states('sensor.ev_energy_required') %}
+        {% set context = states('sensor.hems_ev_charging_context') %}
+        {% set external = context == 'EXTERNAL_CHARGING' %}
+        {% set ev_active = not external and (
+          context in ['HOME_CONNECTED', 'HOME_CHARGING']
+          or is_state('input_boolean.ev_expected_back_today', 'on')) %}
+        {% set pw_required = pw_raw | float(0)
+          if is_number(pw_raw) else 0 %}
+        {% set ev_required = ev_raw | float(0)
+          if ev_active and is_number(ev_raw) else 0 %}
+        {{ (pw_required + ev_required) | round(2) }}
+
+      deadline_window_open: >-
+        {% set target = states('input_datetime.hems_charging_target_time') %}
+        {% if target not in ['unknown', 'unavailable', 'none', ''] %}
+          {% set parts = target.split(':') %}
+          {% set target_seconds =
+            (parts[0] | int(0)) * 3600
+            + (parts[1] | int(0)) * 60
+            + (parts[2] | int(0)) %}
+          {% set now_seconds =
+            now().hour * 3600
+            + now().minute * 60
+            + now().second %}
+          {{
+            now_seconds >= target_seconds
+            and now_seconds <= (target_seconds + 900)
+          }}
+        {% else %}
+          false
         {% endif %}
 
   - condition: template
@@ -115,7 +159,27 @@ actions:
         ]
       }}
 
+  - condition: template
+    value_template: >-
+      {{
+        warning_state != 'WARNING_DEADLINE_PASSED_WITH_SHORTFALL'
+        or (
+          deadline_window_open | bool(false)
+          and is_number(active_shortfall_kwh)
+          and (active_shortfall_kwh | float(0)) >= 1.0
+        )
+      }}
+
   - delay: "00:00:15"
+
+  - condition: template
+    value_template: >-
+      {{
+        warning_state != 'WARNING_DEADLINE_PASSED_WITH_SHORTFALL'
+        or not is_state(
+          'input_boolean.hems_target_extension_offer_pending', 'on'
+        )
+      }}
 
   - condition: template
     value_template: >-
@@ -207,8 +271,8 @@ actions:
           The EV is expected back before the deadline, but the remaining
           physical charging window is too short for the active targets.
         {% else %}
-          The configured charging deadline has passed while at least one active
-          target still has an energy shortfall.
+          The configured charging deadline has just passed with at least 1.0
+          kWh of active energy shortfall remaining.
         {% endif %}
 
       suggested_action: >-
@@ -266,15 +330,17 @@ actions:
           'WARNING_EV_RETURN_AFTER_DEADLINE',
           'WARNING_EV_RETURN_WINDOW_TOO_SHORT'
         ] %}
-        {% set availability = states('sensor.ev_charging_availability') %}
+        {% set context = states('sensor.hems_ev_charging_context') %}
+        {% set external = context == 'EXTERNAL_CHARGING' %}
         {% set soc_raw = states('sensor.hems_effective_ev_soc') %}
         {% set target_raw = states('sensor.hems_ev_target_today') %}
         {% set active_ev_shortfall = (
-          is_number(soc_raw)
+          not external
+          and is_number(soc_raw)
           and is_number(target_raw)
           and (soc_raw | float) < (target_raw | float)
           and (
-            availability in ['READY', 'CHARGING']
+            context in ['HOME_CONNECTED', 'HOME_CHARGING']
             or is_state('input_boolean.ev_expected_back_today', 'on')
           )
         ) %}

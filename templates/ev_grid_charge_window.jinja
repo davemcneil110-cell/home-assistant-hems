@@ -14,6 +14,11 @@
     if target_time_raw not in ['unknown', 'unavailable', 'none', '']
     else '14:30:00' %}
 {% set deadline = today_at(target_time) %}
+{# Planning allowance for AC/DC losses, charger ramping and completion
+   acknowledgement. At 50% -> 100% and 6.8 kW this produces a latest safe
+   start of approximately 10:02 for a 15:00 target. #}
+{% set charging_loss_multiplier = 1.08 %}
+{% set completion_buffer_minutes = 10 %}
 
 {% set target_inputs_valid = is_number(soc_raw)
     and is_number(target_raw) %}
@@ -59,21 +64,36 @@
       DEADLINE_PASSED
     {% elif current_price > maximum_price %}
       WAIT_PRICE_ABOVE_LIMIT
-    {% elif not is_number(cheapest_price_raw) %}
-      FORECAST_UNAVAILABLE
     {% else %}
-      {% set cheapest_price = cheapest_price_raw | float %}
       {% set required_minutes = (energy_required / charge_power) * 60 %}
-      {% set at_cheapest_visible = current_price <= cheapest_price + 0.005 %}
-      {% set all_remaining_cheap_time_needed =
-          cheap_minutes <= required_minutes + 5 %}
+      {% set safe_required_minutes =
+          required_minutes * charging_loss_multiplier
+          + completion_buffer_minutes %}
+      {% set minutes_to_deadline = [
+          (as_timestamp(deadline) - as_timestamp(now())) / 60,
+          0
+        ] | max %}
+      {% set latest_safe_start_reached =
+          minutes_to_deadline <= safe_required_minutes %}
 
-      {% if at_cheapest_visible %}
-        CHARGE_NOW_CHEAPEST_VISIBLE
-      {% elif all_remaining_cheap_time_needed %}
-        CHARGE_NOW_REQUIRED_CHEAP_WINDOW
+      {% if latest_safe_start_reached %}
+        CHARGE_NOW_LATEST_SAFE_START
+      {% elif not is_number(cheapest_price_raw) %}
+        FORECAST_UNAVAILABLE
       {% else %}
-        WAIT_FOR_CHEAPER_VISIBLE_INTERVAL
+        {% set cheapest_price = cheapest_price_raw | float %}
+        {% set at_cheapest_visible =
+            current_price <= cheapest_price + 0.005 %}
+        {% set all_remaining_cheap_time_needed =
+            cheap_minutes <= required_minutes + 5 %}
+
+        {% if at_cheapest_visible %}
+          CHARGE_NOW_CHEAPEST_VISIBLE
+        {% elif all_remaining_cheap_time_needed %}
+          CHARGE_NOW_REQUIRED_CHEAP_WINDOW
+        {% else %}
+          WAIT_FOR_CHEAPER_VISIBLE_INTERVAL
+        {% endif %}
       {% endif %}
     {% endif %}
   {% endif %}

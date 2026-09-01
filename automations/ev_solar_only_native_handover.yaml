@@ -1,0 +1,279 @@
+alias: HEMS - EV Solar Only Native Handover
+description: >-
+  Safely hands a Solar Only EV connection to SolarEdge native excess control.
+  It wakes and refreshes the BYD when genuine excess solar is sustained, but
+  never presses the SolarEdge Start/Boost button and therefore never silently
+  authorises grid charging. It confirms charging from BYD or measured charger
+  power, retries every 30 minutes while genuine surplus remains, and stops the
+  EV if sustained grid import is observed during a Solar Only session.
+triggers:
+  - trigger: template
+    value_template: >-
+      {{
+        states('input_select.hems_ev_connection_charge_plan') == 'Solar Only'
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+        )
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+        )
+        and states(
+          'sensor.solaredge_ev_charger_ev_excess_solar_status'
+        ) | lower == 'enabled'
+        and states('sensor.solaredge_ev_charger_ev_charger_mode') | lower
+          == 'auto'
+        and states('sensor.hems_genuine_excess_solar') == 'AVAILABLE'
+        and states('sensor.hems_ev_charge_permission') == 'ALLOW_EXCESS_SOLAR'
+        and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+        and is_state('input_boolean.hems_ev_manual_override', 'off')
+        and is_state('input_boolean.hems_test_mode', 'off')
+        and is_number(states('sensor.hems_effective_ev_soc'))
+        and states('sensor.hems_effective_ev_soc') | float < 99.5
+        and not (
+          is_state('binary_sensor.atto_3_charging', 'on')
+          or states(
+            'sensor.solaredge_ev_charger_ev_charger_power'
+          ) | float(0) > 0.5
+        )
+      }}
+    for: "00:03:00"
+    id: surplus_ready
+
+  - trigger: time_pattern
+    minutes: "/30"
+    id: retry
+
+  - trigger: template
+    value_template: >-
+      {{
+        states('input_select.hems_ev_connection_charge_plan') == 'Solar Only'
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+        )
+        and (
+          is_state('binary_sensor.atto_3_charging', 'on')
+          or states(
+            'sensor.solaredge_ev_charger_ev_charger_power'
+          ) | float(0) > 0.5
+        )
+        and is_number(states('sensor.hems_effective_grid_power'))
+        and states('sensor.hems_effective_grid_power') | float > 1.0
+      }}
+    for: "00:03:00"
+    id: solar_only_grid_import
+
+conditions: []
+
+actions:
+  - variables:
+      trigger_id: "{{ trigger.id | default('manual') }}"
+      plan: >-
+        {{ states('input_select.hems_ev_connection_charge_plan') }}
+      connected: >-
+        {{ is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+        ) }}
+      native_enabled: >-
+        {{
+          is_state(
+            'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+          )
+          and states(
+            'sensor.solaredge_ev_charger_ev_excess_solar_status'
+          ) | lower == 'enabled'
+          and states(
+            'sensor.solaredge_ev_charger_ev_charger_mode'
+          ) | lower == 'auto'
+        }}
+      actual_energy_transfer: >-
+        {{
+          is_state('binary_sensor.atto_3_charging', 'on')
+          or states(
+            'sensor.solaredge_ev_charger_ev_charger_power'
+          ) | float(0) > 0.5
+        }}
+      safe_to_attempt_handover: >-
+        {{
+          plan == 'Solar Only'
+          and connected
+          and native_enabled
+          and states('sensor.hems_genuine_excess_solar') == 'AVAILABLE'
+          and states('sensor.hems_ev_charge_permission') == 'ALLOW_EXCESS_SOLAR'
+          and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+          and is_state('input_boolean.hems_ev_manual_override', 'off')
+          and is_state('input_boolean.hems_test_mode', 'off')
+          and is_number(states('sensor.hems_effective_ev_soc'))
+          and states('sensor.hems_effective_ev_soc') | float < 99.5
+          and not actual_energy_transfer
+        }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                trigger_id == 'solar_only_grid_import'
+                and plan == 'Solar Only'
+                and connected
+                and actual_energy_transfer
+              }}
+        sequence:
+          - action: button.press
+            continue_on_error: true
+            target:
+              entity_id: >-
+                button.solaredge_ev_charger_ev_charger_stop_charging
+
+          - wait_template: >-
+              {{
+                not is_state('binary_sensor.atto_3_charging', 'on')
+                and states(
+                  'sensor.solaredge_ev_charger_ev_charger_power'
+                ) | float(99) <= 0.2
+              }}
+            timeout: "00:07:00"
+            continue_on_timeout: true
+
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS stopped Solar Only grid import
+              message: >-
+                Solar Only was selected, but grid import remained above 1.0 kW
+                for three minutes while the EV was charging. HEMS sent one EV
+                stop command. No SolarEdge Start/Boost command was used.
+              data:
+                tag: hems_solar_only_handover
+                ttl: 3600
+
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS stopped Solar Only grid import
+              message: >-
+                Solar Only was selected, but grid import remained above 1.0 kW
+                for three minutes while the EV was charging. HEMS stopped the
+                EV and will wait for genuine excess solar.
+              data:
+                tag: hems_solar_only_handover
+                ttl: 3600
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                trigger_id in ['surplus_ready', 'retry', 'manual']
+                and safe_to_attempt_handover
+              }}
+        sequence:
+          - action: button.press
+            continue_on_error: true
+            target:
+              entity_id: button.atto_3_force_poll
+
+          - wait_template: >-
+              {{
+                is_state('binary_sensor.atto_3_charging', 'on')
+                or states(
+                  'sensor.solaredge_ev_charger_ev_charger_power'
+                ) | float(0) > 0.5
+                or not is_state(
+                  'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                  'on'
+                )
+                or states(
+                  'input_select.hems_ev_connection_charge_plan'
+                ) != 'Solar Only'
+                or states('sensor.hems_genuine_excess_solar') != 'AVAILABLE'
+              }}
+            timeout: "00:07:00"
+            continue_on_timeout: true
+
+          - variables:
+              transfer_confirmed: >-
+                {{
+                  is_state('binary_sensor.atto_3_charging', 'on')
+                  or states(
+                    'sensor.solaredge_ev_charger_ev_charger_power'
+                  ) | float(0) > 0.5
+                }}
+              still_waiting_for_native: >-
+                {{
+                  states(
+                    'input_select.hems_ev_connection_charge_plan'
+                  ) == 'Solar Only'
+                  and is_state(
+                    'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                    'on'
+                  )
+                  and states(
+                    'sensor.hems_genuine_excess_solar'
+                  ) == 'AVAILABLE'
+                  and not (
+                    is_state('binary_sensor.atto_3_charging', 'on')
+                    or states(
+                      'sensor.solaredge_ev_charger_ev_charger_power'
+                    ) | float(0) > 0.5
+                  )
+                }}
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ transfer_confirmed }}"
+                sequence:
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS Solar Only activated
+                      message: >-
+                        Genuine excess solar is now charging the EV. HEMS used
+                        the BYD refresh/wake path only; no SolarEdge Start/Boost
+                        command and no grid-charging permission were issued.
+                      data:
+                        tag: hems_solar_only_handover
+                        ttl: 3600
+
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS Solar Only activated
+                      message: >-
+                        Genuine excess solar is now charging the EV. No grid
+                        charging was authorised.
+                      data:
+                        tag: hems_solar_only_handover
+                        ttl: 3600
+
+              - conditions:
+                  - condition: template
+                    value_template: "{{ still_waiting_for_native }}"
+                sequence:
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS Solar Only did not activate
+                      message: >-
+                        Solar Only is selected and genuine surplus is available,
+                        but BYD/SolarEdge did not confirm real EV power after the
+                        safe wake attempt. HEMS deliberately did not press
+                        Start/Boost because that could import grid. This warning
+                        will repeat in 30 minutes while the condition remains.
+                      data:
+                        tag: hems_solar_only_handover
+                        ttl: 3600
+
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS Solar Only did not activate
+                      message: >-
+                        Genuine excess solar is available, but the EV did not
+                        confirm charging after the safe wake attempt. HEMS did
+                        not use grid/Boost and will retry in 30 minutes.
+                      data:
+                        tag: hems_solar_only_handover
+                        ttl: 3600
+
+mode: single
+max_exceeded: silent
