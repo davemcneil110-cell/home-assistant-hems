@@ -1,5 +1,20 @@
 # Canonical source manifest
 
+## 0.3.0-alpha additions
+
+- Fused-readback EV Worker, revised 30 August 2026.
+- EV connection-plan target follow-up and targetless Solar Only flow.
+- Solar Only native handover and UI-owned native-excess supervisor.
+- Optimal-grid/native-excess Powerwall package and serialised Powerwall Worker.
+- EV-plugged-interlocked dual-latch solar package and matching Solar Worker.
+- Protected-recovery Solar/Powerwall SOC-cycle package, revised 1 September
+  2026.
+- Coordinated Powerwall reserve template with an independent cycle floor and
+  end-of-day target protection.
+
+The public filenames are intentionally stable and omit private repair dates.
+The release changelog records the commissioning revision.
+
 This manifest prevents obsolete commissioning iterations from being published.
 Only the listed current files are candidates for the first alpha release.
 

@@ -121,6 +121,17 @@ approved
 declined
 ```
 
+### `input_select.hems_ev_connection_charge_plan`
+
+Initial: `Unanswered`
+
+```text
+Unanswered
+Cheap Grid
+Solar Only
+Charge Now
+```
+
 ## Date/time and text helpers
 
 | Entity ID | Type | Initial guidance |
@@ -145,6 +156,13 @@ Do not create these manually when the supplied packages are enabled:
 - `input_number.hems_solar_historical_average_value`
 - `input_number.hems_powerwall_historical_discharge_energy`
 - `input_number.hems_powerwall_historical_average_value`
+
+The following packages also declare their own complete helper sets. Do not
+duplicate those helpers in the UI:
+
+- `packages/powerwall_optimal_grid_native_excess.yaml`
+- `packages/solar_ev_interlock.yaml`
+- `packages/solar_powerwall_soc_cycle.yaml`
 
 ## Fresh-install limitation
 

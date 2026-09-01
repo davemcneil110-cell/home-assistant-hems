@@ -1,5 +1,6 @@
-# Full UI YAML replacement. Revised 2026-07-31 after the live approved-recovery
-# interlock-transition stop loop and delayed SolarEdge acknowledgement.
+# Full UI YAML replacement. Revised 2026-08-30 after a deployed short Worker
+# blocked an eligible cheap-grid session on stale raw charging/availability
+# readback. This is the sole EV Worker definition to install.
 alias: HEMS - EV Worker
 description: >-
   Sole EV charger control worker. It owns only deliberate cheap-grid, urgent
@@ -10,18 +11,22 @@ description: >-
   running state even while the Powerwall is changing between early flexible
   discharge, hold, and simultaneous cheap-grid charging. These Powerwall
   changes are policy transitions, not EV safety faults, and can no longer issue
-  a protective Stop. The Powerwall Worker continues converging independently.
-  A Worker fault is durable and can only be reset manually; an unchanged charge
-  approval can therefore never recreate a failed session or repeat Start/Stop
-  commands. Manual override or disabling either controlling system releases
+  a protective Stop. An approved cheap-grid, urgent-recovery, or charge-now
+  request may also take ownership when SolarEdge native control is already
+  charging: the Worker sends one explicit Start to request full-rate charging
+  and requires fresh post-command charger feedback before declaring success.
+  The Powerwall Worker continues converging independently.
+  A Worker fault remains durable for the same physical connection, so an
+  unchanged charge approval can never recreate a failed session or repeat
+  Start/Stop commands. After a genuine unplug/replug, a newly established real
+  connection safely clears a stale fault into cooldown without issuing any
+  hardware command. Manual override or disabling either controlling system releases
   Worker ownership without sending a hardware command. It waits for real
   charger acknowledgement, applies a no-repeat cooldown, and only stops
   sessions that it owns when their charging permission genuinely ends. A
-  session being prepared for a Powerwall interlock is
-  not yet command-owned: if native SolarEdge or a person starts charging before
-  the Worker issues Start, the Worker yields without Stop or fault. Native
-  SolarEdge Excess Solar and manually started sessions are never claimed or
-  stopped. Either the SolarEdge connection
+  session being prepared for a Powerwall interlock is not yet command-owned.
+  Unapproved native SolarEdge Excess Solar and manually started sessions are
+  never claimed or stopped. Either the SolarEdge connection
   sensor or the BYD plug sensor may establish that the EV is physically
   connected. Charging acknowledgement is fused from SolarEdge charging/power
   and BYD charging/battery-power telemetry; BYD charging evidence overrides an
@@ -29,7 +34,8 @@ description: >-
   interpreted as confirmed off. A cheap-grid session is also checked directly
   against the effective live grid-charge price limit, so an expensive interval
   cannot continue merely because another planning sensor is stale. Any HEMS
-  test scenario or EV manual override blocks new hardware commands.
+  test scenario or EV manual override blocks new hardware commands. This full
+  replacement supersedes the shorter repairs/ev_worker.yaml definition.
 triggers:
   - trigger: state
     entity_id:
@@ -39,10 +45,8 @@ triggers:
       - sensor.hems_effective_import_price
       - sensor.hems_effective_grid_charge_price_limit
       - binary_sensor.solaredge_ev_charger_ev_charger_charging
-      - binary_sensor.solaredge_ev_charger_ev_charger_connected
       - sensor.solaredge_ev_charger_ev_charger_power
       - sensor.solaredge_ev_charger_ev_charger_status
-      - binary_sensor.atto_3_plug
       - binary_sensor.atto_3_charging
       - sensor.atto_3_battery_power
       - input_boolean.enable_ev_automation
@@ -51,6 +55,13 @@ triggers:
       - input_boolean.hems_powerwall_manual_override
       - input_boolean.hems_ev_worker_session_active
       - input_select.hems_ev_worker_session_type
+  - trigger: state
+    entity_id:
+      - binary_sensor.solaredge_ev_charger_ev_charger_connected
+      - binary_sensor.atto_3_plug
+    from: "off"
+    to: "on"
+    id: physical_connection
   - trigger: state
     entity_id:
       - input_boolean.hems_test_mode
@@ -106,9 +117,10 @@ actions:
           unavailable
         {% endif %}
       charging: >-
-        {% set solaredge = states(
-          'binary_sensor.solaredge_ev_charger_ev_charger_charging'
-        ) %}
+        {% set solaredge_entity =
+          states.binary_sensor.solaredge_ev_charger_ev_charger_charging %}
+        {% set solaredge = solaredge_entity.state
+          if solaredge_entity is not none else 'unavailable' %}
         {% set solaredge_power = states(
           'sensor.solaredge_ev_charger_ev_charger_power'
         ) %}
@@ -117,38 +129,31 @@ actions:
         ) | lower %}
         {% set byd = states('binary_sensor.atto_3_charging') %}
         {% set byd_power = states('sensor.atto_3_battery_power') %}
-        {% set solaredge_on =
-          solaredge == 'on'
+        {% set raw_on_age =
+          as_timestamp(now()) - as_timestamp(solaredge_entity.last_changed)
+          if solaredge_entity is not none else 999999 %}
+        {% set fresh_solaredge_on =
+          solaredge == 'on' and raw_on_age >= 0 and raw_on_age <= 600 %}
+        {% set measured_solaredge_on =
+          (is_number(solaredge_power) and solaredge_power | float >= 0.5)
+          or solaredge_status == 'charging' %}
+        {% set measured_byd_on =
+          byd == 'on'
           or (
-            is_number(solaredge_power)
-            and (solaredge_power | float) >= 1.0
-          )
-          or solaredge_status == 'charging'
-        %}
-        {% set solaredge_off =
-          solaredge == 'off'
-          and is_number(solaredge_power)
-          and (solaredge_power | float) < 0.5
-          and solaredge_status not in ['charging', 'initializing']
-        %}
+            is_state('binary_sensor.atto_3_plug', 'on')
+            and is_number(byd_power)
+            and (byd_power | float | abs) >= 1000
+          ) %}
         {{
-          solaredge_on
-          or (
-            not solaredge_off
-            and (
-              byd == 'on'
-              or (
-                is_state('binary_sensor.atto_3_plug', 'on')
-                and is_number(byd_power)
-                and (byd_power | float | abs) >= 1000
-              )
-            )
-          )
+          fresh_solaredge_on
+          or measured_solaredge_on
+          or measured_byd_on
         }}
       charging_state: >-
-        {% set solaredge = states(
-          'binary_sensor.solaredge_ev_charger_ev_charger_charging'
-        ) %}
+        {% set solaredge_entity =
+          states.binary_sensor.solaredge_ev_charger_ev_charger_charging %}
+        {% set solaredge = solaredge_entity.state
+          if solaredge_entity is not none else 'unavailable' %}
         {% set byd = states('binary_sensor.atto_3_charging') %}
         {% set solaredge_power = states(
           'sensor.solaredge_ev_charger_ev_charger_power'
@@ -157,22 +162,15 @@ actions:
           'sensor.solaredge_ev_charger_ev_charger_status'
         ) | lower %}
         {% set byd_power = states('sensor.atto_3_battery_power') %}
-        {% set solaredge_on =
-          solaredge == 'on'
-          or (
-            is_number(solaredge_power)
-            and (solaredge_power | float) >= 1.0
-          )
-          or solaredge_status == 'charging'
-        %}
-        {% set solaredge_off =
-          solaredge == 'off'
-          and
-          is_number(solaredge_power)
-          and (solaredge_power | float) < 0.5
-          and solaredge_status not in ['charging', 'initializing']
-        %}
-        {% set byd_on =
+        {% set raw_on_age =
+          as_timestamp(now()) - as_timestamp(solaredge_entity.last_changed)
+          if solaredge_entity is not none else 999999 %}
+        {% set fresh_solaredge_on =
+          solaredge == 'on' and raw_on_age >= 0 and raw_on_age <= 600 %}
+        {% set measured_solaredge_on =
+          (is_number(solaredge_power) and solaredge_power | float >= 0.5)
+          or solaredge_status == 'charging' %}
+        {% set measured_byd_on =
           byd == 'on'
           or (
             is_state('binary_sensor.atto_3_plug', 'on')
@@ -180,11 +178,31 @@ actions:
             and (byd_power | float | abs) >= 1000
           )
         %}
-        {% if solaredge_on %}
+        {% set solaredge_idle =
+          is_number(solaredge_power)
+          and solaredge_power | float < 0.5
+          and solaredge_status in [
+            'plugged in', 'connected', 'not charging', 'stopped',
+            'idle', 'available', 'ready'
+          ] %}
+        {% set byd_idle =
+          byd == 'off'
+          and (
+            not is_number(byd_power)
+            or (byd_power | float | abs) < 1000
+          ) %}
+        {% if fresh_solaredge_on
+              or measured_solaredge_on
+              or measured_byd_on %}
           on
-        {% elif byd_on %}
-          on
-        {% elif solaredge_off and byd == 'off' %}
+        {% elif solaredge_idle and byd_idle %}
+          off
+        {% elif solaredge == 'off'
+                and byd_idle
+                and (
+                  not is_number(solaredge_power)
+                  or solaredge_power | float < 0.5
+                ) %}
           off
         {% else %}
           unavailable
@@ -276,7 +294,130 @@ actions:
             and permission == 'EV_APPROVED_CHARGE_NOW'
           )
         }}
+      session_claim_timestamp: >-
+        {% set entity =
+          states['input_boolean.hems_ev_worker_session_active'] %}
+        {{
+          as_timestamp(entity.last_changed, default=0) | float(0)
+          if entity is not none else 0
+        }}
+      last_command_timestamp: >-
+        {{
+          as_timestamp(
+            states('input_datetime.hems_ev_worker_last_command'),
+            default=0
+          ) | float(0)
+        }}
+      takeover_start_required: >-
+        {{
+          session_active
+          and charging_state == 'on'
+          and permission_matches_session
+          and (last_command_timestamp | float(0))
+            < (session_claim_timestamp | float(0))
+        }}
+      fresh_start_acknowledgement: >-
+        {% set command_ts = last_command_timestamp | float(0) %}
+        {% set se_status =
+          states['sensor.solaredge_ev_charger_ev_charger_status'] %}
+        {% set se_binary =
+          states[
+            'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+          ] %}
+        {% set byd = states['binary_sensor.atto_3_charging'] %}
+        {% set se_power =
+          states['sensor.solaredge_ev_charger_ev_charger_power'] %}
+        {{
+          command_ts > 0
+          and (
+            (
+              se_status is not none
+              and as_timestamp(se_status.last_updated, default=0)
+                > command_ts + 1
+              and se_status.state | lower == 'charging'
+            )
+            or (
+              se_binary is not none
+              and as_timestamp(se_binary.last_updated, default=0)
+                > command_ts + 1
+              and se_binary.state == 'on'
+            )
+            or (
+              byd is not none
+              and as_timestamp(byd.last_updated, default=0)
+                > command_ts + 1
+              and byd.state == 'on'
+            )
+            or (
+              se_power is not none
+              and as_timestamp(se_power.last_updated, default=0)
+                > command_ts + 1
+              and is_number(se_power.state)
+              and se_power.state | float(0) >= 0.5
+            )
+          )
+        }}
   - choose:
+      # A fault remains locked for the same physical connection. A sensor that
+      # was continuously off for at least 30 seconds and then turns on is
+      # treated as a genuine unplug/replug. The BYD plug sensor is authoritative
+      # because the SolarEdge connected sensor can remain stale. A SolarEdge-only
+      # transition is accepted only when the BYD plug sensor is not already on.
+      # Clear only stale helper state; never press a charger button here.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {% set trigger_entity = trigger.entity_id | default('') %}
+              {% set other_connection =
+                'binary_sensor.atto_3_plug'
+                if trigger_entity ==
+                  'binary_sensor.solaredge_ev_charger_ev_charger_connected'
+                else
+                  'binary_sensor.solaredge_ev_charger_ev_charger_connected'
+              %}
+              {% set prior_off_seconds =
+                as_timestamp(trigger.to_state.last_changed)
+                - as_timestamp(trigger.from_state.last_changed)
+                if trigger.id == 'physical_connection'
+                   and trigger.from_state is not none
+                   and trigger.to_state is not none
+                else 0
+              %}
+              {% set genuine_connection =
+                trigger_entity == 'binary_sensor.atto_3_plug'
+                or not is_state(other_connection, 'on')
+              %}
+              {{
+                trigger.id == 'physical_connection'
+                and command_state == 'fault'
+                and not session_active
+                and connected
+                and genuine_connection
+                and prior_off_seconds >= 30
+                and worker_control_allowed
+              }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_worker_session_active
+                - input_boolean.hems_ev_urgent_charge_active
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_session_type
+            data:
+              option: none
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.hems_ev_worker_last_command
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_worker_command_state
+            data:
+              option: cooldown
+
       # Home Assistant restores input helpers across a restart. Recover an
       # abandoned non-idle command when there is no Worker-owned session and
       # fused telemetry confirms the EV is not charging. The existing cooldown
@@ -558,6 +699,7 @@ actions:
                 and charging_state == 'on'
                 and command_state == 'idle'
                 and not recent_worker_start
+                and not permission_matches_session
               }}
         sequence:
           - action: input_boolean.turn_off
@@ -603,6 +745,7 @@ actions:
                 command_guard == 'START_ACK_TIMEOUT'
                 and command_state == 'start_pending'
                 and charging_state == 'off'
+                and not fresh_start_acknowledgement
               }}
         sequence:
           - action: input_select.select_option
@@ -653,7 +796,8 @@ actions:
               {{
                 command_guard == 'START_ACK_TIMEOUT'
                 and command_state == 'start_pending'
-                and charging_state not in ['off', 'on']
+                and charging_state != 'off'
+                and not fresh_start_acknowledgement
               }}
         sequence:
           - action: input_select.select_option
@@ -674,26 +818,28 @@ actions:
           - action: notify.mobile_app_primary_phone
             continue_on_error: true
             data:
-              title: HEMS EV state unavailable after Start
+              title: HEMS EV fresh Start feedback missing
               message: >-
-                No EV source provided a reliable charging state within 12
-                minutes of Start. The Worker entered FAULT_LOCKOUT, released
-                session ownership and the Powerwall interlock, and sent no
-                repeated command. Check the charger before manually resetting
-                the command state to idle.
+                SolarEdge or BYD may still show a stale charging state, but no
+                EV source refreshed after the Worker's Start command within 12
+                minutes. The Worker entered FAULT_LOCKOUT, released session
+                ownership and the Powerwall interlock, and sent no repeated
+                command. Check the charger before manually resetting the
+                command state to idle.
               data:
                 tag: hems_ev_worker_fault
                 alert_once: true
           - action: notify.mobile_app_secondary_ev_phone
             continue_on_error: true
             data:
-              title: HEMS EV state unavailable after Start
+              title: HEMS EV fresh Start feedback missing
               message: >-
-                No EV source provided a reliable charging state within 12
-                minutes of Start. The Worker entered FAULT_LOCKOUT, released
-                session ownership and the Powerwall interlock, and sent no
-                repeated command. Check the charger before manually resetting
-                the command state to idle.
+                SolarEdge or BYD may still show a stale charging state, but no
+                EV source refreshed after the Worker's Start command within 12
+                minutes. The Worker entered FAULT_LOCKOUT, released session
+                ownership and the Powerwall interlock, and sent no repeated
+                command. Check the charger before manually resetting the
+                command state to idle.
               data:
                 tag: hems_ev_worker_fault
                 alert_once: true
@@ -758,7 +904,7 @@ actions:
             value_template: >-
               {{
                 command_state == 'start_pending'
-                and charging_state == 'on'
+                and fresh_start_acknowledgement
               }}
         sequence:
           # The durable running state is the authoritative ownership proof. It
@@ -942,7 +1088,6 @@ actions:
                 and powerwall_control_allowed
                 and command_guard == 'READY'
                 and connected
-                and charging_state == 'off'
                 and permission in [
                   'ALLOW_CHEAP_GRID',
                   'EV_URGENT_START_TO_50',
@@ -1017,7 +1162,10 @@ actions:
                 and permission_matches_session
                 and command_guard == 'READY'
                 and connected
-                and charging_state == 'off'
+                and (
+                  charging_state == 'off'
+                  or takeover_start_required
+                )
                 and interlock_status == 'READY'
                 and (interlock_ready_seconds | int(0)) >= 60
               }}
@@ -1065,10 +1213,6 @@ actions:
                     'on'
                   )
                   or is_state('binary_sensor.atto_3_plug', 'on')
-                )
-                and is_state(
-                  'binary_sensor.solaredge_ev_charger_ev_charger_charging',
-                  'off'
                 )
               }}
           - action: input_datetime.set_datetime

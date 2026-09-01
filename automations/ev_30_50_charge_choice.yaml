@@ -1,14 +1,16 @@
 alias: HEMS - EV Above-30 Charge Choice
 description: >-
-  When either the BYD or SolarEdge integration confirms that the EV is plugged
-  in while its SOC is above 30% and below today's target, asks primary user and secondary EV user
-  whether to keep normal solar/cheap-grid planning or charge immediately. A
-  Charge now response opens a second choice: until unplugged, until today's
-  target, or until full. The first phone response wins at each stage. The
-  automation remains active until both plug sensors report unplugged, preventing
-  the integrations' delayed updates from producing a duplicate prompt. This
-  automation only updates HEMS planning helpers and sends notifications; the
-  guarded EV Worker remains the sole charger owner.
+  For an EV connected above 30% and below today's target, records one durable
+  plan for the complete physical connection: Cheap Grid, Solar Only, or Charge
+  Now. Cheap Grid and Charge Now are followed by a second choice between the
+  normal daily target and 100% full. Solar Only is a one-step, targetless plan:
+  it uses whatever genuine/native excess solar becomes available and may
+  continue opportunistically up to the vehicle's physical full state.
+  The choice survives Home Assistant and automation reloads and is reset only
+  after both plug sensors confirm a genuine unplug. One reminder is sent after
+  15 minutes if unanswered. This automation only updates HEMS planning helpers
+  and sends EV notifications to the primary and secondary EV users; the guarded EV Worker remains
+  the sole full-rate charger controller.
 triggers:
   - trigger: state
     entity_id: binary_sensor.solaredge_ev_charger_ev_charger_connected
@@ -20,6 +22,9 @@ triggers:
     to: "on"
     for: "00:00:20"
     id: byd_plugged
+  - trigger: time_pattern
+    minutes: "/1"
+    id: connected_recovery_scan
 conditions:
   - condition: state
     entity_id: input_boolean.enable_ev_automation
@@ -36,6 +41,9 @@ conditions:
   - condition: state
     entity_id: input_boolean.hems_test_ev_home_plugged_low_soc
     state: "off"
+  - condition: state
+    entity_id: input_select.hems_ev_connection_charge_plan
+    state: Unanswered
   - condition: template
     value_template: >-
       {{
@@ -46,19 +54,6 @@ conditions:
         or is_state('binary_sensor.atto_3_plug', 'on')
       }}
 actions:
-  - choose:
-      - conditions:
-          - condition: state
-            entity_id: input_boolean.hems_ev_recovery_approved
-            state: "on"
-          - condition: state
-            entity_id: input_boolean.ev_expected_back_today
-            state: "off"
-        sequence:
-          - action: input_boolean.turn_off
-            target:
-              entity_id: input_boolean.hems_ev_recovery_approved
-
   - delay: "00:00:02"
 
   - condition: template
@@ -71,6 +66,10 @@ actions:
         and (soc | float) > 30
         and (soc | float) < (target | float)
         and is_state('input_boolean.hems_ev_recovery_approved', 'off')
+        and is_state(
+          'input_select.hems_ev_connection_charge_plan',
+          'Unanswered'
+        )
       }}
 
   - variables:
@@ -78,6 +77,8 @@ actions:
         {{ states('sensor.hems_effective_ev_soc') | float | round(0) | int }}
       ev_target: >-
         {{ states('sensor.hems_ev_target_today') | float | round(0) | int }}
+      normal_ev_target: >-
+        {{ states('input_number.ev_target') | float | round(0) | int }}
       current_price_display: >-
         {% set value = states('sensor.hems_effective_import_price') %}
         {% if is_number(value) %}
@@ -98,85 +99,67 @@ actions:
     data:
       message: clear_notification
       data:
-        tag: hems_ev_30_50_choice
+        tag: hems_ev_connection_charge_plan
   - action: notify.mobile_app_secondary_ev_phone
     continue_on_error: true
     data:
       message: clear_notification
       data:
-        tag: hems_ev_30_50_choice
+        tag: hems_ev_connection_charge_plan
 
   - action: notify.mobile_app_primary_phone
     continue_on_error: true
     data:
       title: HEMS EV charging choice
       message: >-
-        The EV has been plugged in at {{ ev_soc }}%, below today's
-        {{ ev_target }}% target. Current Amber price:
-        {{ current_price_display }}. Cheapest visible price:
-        {{ cheapest_price_display }}. Keep normal excess-solar/cheap-grid
-        planning, or charge now?
+        The EV is connected at {{ ev_soc }}%, below today's {{ ev_target }}%
+        target. Current Amber price: {{ current_price_display }}. Cheapest
+        visible price: {{ cheapest_price_display }}. Choose the plan for this
+        connection.
       data:
-        tag: hems_ev_30_50_choice
-        alert_once: true
-        ttl: 0
-        priority: high
-        channel: HEMS EV Decisions
-        importance: high
+        tag: hems_ev_connection_charge_plan
         actions:
-          - action: HEMS_EV_WAIT_FOR_CHEAP_GRID
-            title: Wait for cheap grid
-            authenticationRequired: true
+          - action: HEMS_EV_CHEAP_GRID_PLAN
+            title: Cheap Grid
+          - action: HEMS_EV_SOLAR_ONLY_PLAN
+            title: Solar Only
           - action: HEMS_EV_CHARGE_NOW
-            title: Charge now
-            authenticationRequired: true
-          - action: HEMS_EV_DECIDE_LATER
-            title: Decide later
-            authenticationRequired: true
+            title: Charge Now
   - action: notify.mobile_app_secondary_ev_phone
     continue_on_error: true
     data:
       title: HEMS EV charging choice
       message: >-
-        The EV has been plugged in at {{ ev_soc }}%, below today's
-        {{ ev_target }}% target. Current Amber price:
-        {{ current_price_display }}. Cheapest visible price:
-        {{ cheapest_price_display }}. Keep normal excess-solar/cheap-grid
-        planning, or charge now?
+        The EV is connected at {{ ev_soc }}%, below today's {{ ev_target }}%
+        target. Current Amber price: {{ current_price_display }}. Cheapest
+        visible price: {{ cheapest_price_display }}. Choose the plan for this
+        connection.
       data:
-        tag: hems_ev_30_50_choice
-        alert_once: true
-        ttl: 0
-        priority: high
-        channel: HEMS EV Decisions
-        importance: high
+        tag: hems_ev_connection_charge_plan
         actions:
-          - action: HEMS_EV_WAIT_FOR_CHEAP_GRID
-            title: Wait for cheap grid
-            authenticationRequired: true
+          - action: HEMS_EV_CHEAP_GRID_PLAN
+            title: Cheap Grid
+          - action: HEMS_EV_SOLAR_ONLY_PLAN
+            title: Solar Only
           - action: HEMS_EV_CHARGE_NOW
-            title: Charge now
-            authenticationRequired: true
-          - action: HEMS_EV_DECIDE_LATER
-            title: Decide later
-            authenticationRequired: true
+            title: Charge Now
 
   - wait_for_trigger:
       - trigger: event
         event_type: mobile_app_notification_action
         event_data:
-          action: HEMS_EV_WAIT_FOR_CHEAP_GRID
-        id: wait_for_cheap_grid
+          action: HEMS_EV_CHEAP_GRID_PLAN
+        id: cheap_grid
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: HEMS_EV_SOLAR_ONLY_PLAN
+        id: solar_only
       - trigger: event
         event_type: mobile_app_notification_action
         event_data:
           action: HEMS_EV_CHARGE_NOW
         id: charge_now
-      - trigger: event
-        event_type: mobile_app_notification_action
-        event_data:
-          action: HEMS_EV_DECIDE_LATER
-        id: decide_later
       - trigger: template
         value_template: >-
           {{
@@ -187,124 +170,68 @@ actions:
             )
           }}
         id: unplugged
-    timeout: "01:00:00"
+    timeout: "00:15:00"
     continue_on_timeout: true
 
   - variables:
-      first_choice: >-
+      initial_plan_choice: >-
         {{ wait.trigger.id if wait.trigger is not none else 'timed_out' }}
-
-  - action: notify.mobile_app_primary_phone
-    continue_on_error: true
-    data:
-      message: clear_notification
-      data:
-        tag: hems_ev_30_50_choice
-  - action: notify.mobile_app_secondary_ev_phone
-    continue_on_error: true
-    data:
-      message: clear_notification
-      data:
-        tag: hems_ev_30_50_choice
 
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ first_choice == 'wait_for_cheap_grid' }}"
-        sequence:
-          - action: input_boolean.turn_off
-            target:
-              entity_id:
-                - input_boolean.hems_ev_recovery_approved
-                - input_boolean.ev_expected_back_today
-          - action: notify.mobile_app_primary_phone
-            continue_on_error: true
-            data:
-              title: HEMS EV plan updated
-              message: >-
-                Normal planning remains active. The EV will wait for genuine
-                excess solar or the planned cheap-grid interval.
-              data:
-                tag: hems_ev_30_50_result
-                alert_once: true
-          - action: notify.mobile_app_secondary_ev_phone
-            continue_on_error: true
-            data:
-              title: HEMS EV plan updated
-              message: >-
-                Normal planning remains active. The EV will wait for genuine
-                excess solar or the planned cheap-grid interval.
-              data:
-                tag: hems_ev_30_50_result
-                alert_once: true
-
-      - conditions:
-          - condition: template
-            value_template: "{{ first_choice == 'charge_now' }}"
+            value_template: "{{ initial_plan_choice == 'timed_out' }}"
         sequence:
           - action: notify.mobile_app_primary_phone
             continue_on_error: true
             data:
-              title: HEMS EV charge-now limit
+              title: HEMS EV charging choice
               message: >-
-                How persistent should this immediate charging instruction be?
+                Reminder: the connected EV is at {{ ev_soc }}%, below today's
+                {{ ev_target }}% target. Choose Cheap Grid, Solar Only, or
+                Charge Now for this connection.
               data:
-                tag: hems_ev_30_50_choice
-                alert_once: true
-                ttl: 0
-                priority: high
-                channel: HEMS EV Decisions
-                importance: high
+                tag: hems_ev_connection_charge_plan
                 actions:
-                  - action: HEMS_EV_UNTIL_UNPLUGGED
-                    title: Until unplugged
-                    authenticationRequired: true
-                  - action: HEMS_EV_UNTIL_TARGET
-                    title: Until target
-                    authenticationRequired: true
-                  - action: HEMS_EV_UNTIL_FULL
-                    title: Until full
-                    authenticationRequired: true
+                  - action: HEMS_EV_CHEAP_GRID_PLAN
+                    title: Cheap Grid
+                  - action: HEMS_EV_SOLAR_ONLY_PLAN
+                    title: Solar Only
+                  - action: HEMS_EV_CHARGE_NOW
+                    title: Charge Now
           - action: notify.mobile_app_secondary_ev_phone
             continue_on_error: true
             data:
-              title: HEMS EV charge-now limit
+              title: HEMS EV charging choice
               message: >-
-                How persistent should this immediate charging instruction be?
+                Reminder: the connected EV is at {{ ev_soc }}%, below today's
+                {{ ev_target }}% target. Choose Cheap Grid, Solar Only, or
+                Charge Now for this connection.
               data:
-                tag: hems_ev_30_50_choice
-                alert_once: true
-                ttl: 0
-                priority: high
-                channel: HEMS EV Decisions
-                importance: high
+                tag: hems_ev_connection_charge_plan
                 actions:
-                  - action: HEMS_EV_UNTIL_UNPLUGGED
-                    title: Until unplugged
-                    authenticationRequired: true
-                  - action: HEMS_EV_UNTIL_TARGET
-                    title: Until target
-                    authenticationRequired: true
-                  - action: HEMS_EV_UNTIL_FULL
-                    title: Until full
-                    authenticationRequired: true
-
+                  - action: HEMS_EV_CHEAP_GRID_PLAN
+                    title: Cheap Grid
+                  - action: HEMS_EV_SOLAR_ONLY_PLAN
+                    title: Solar Only
+                  - action: HEMS_EV_CHARGE_NOW
+                    title: Charge Now
           - wait_for_trigger:
               - trigger: event
                 event_type: mobile_app_notification_action
                 event_data:
-                  action: HEMS_EV_UNTIL_UNPLUGGED
-                id: until_unplugged
+                  action: HEMS_EV_CHEAP_GRID_PLAN
+                id: cheap_grid
               - trigger: event
                 event_type: mobile_app_notification_action
                 event_data:
-                  action: HEMS_EV_UNTIL_TARGET
-                id: until_target
+                  action: HEMS_EV_SOLAR_ONLY_PLAN
+                id: solar_only
               - trigger: event
                 event_type: mobile_app_notification_action
                 event_data:
-                  action: HEMS_EV_UNTIL_FULL
-                id: until_full
+                  action: HEMS_EV_CHARGE_NOW
+                id: charge_now
               - trigger: template
                 value_template: >-
                   {{
@@ -315,151 +242,282 @@ actions:
                     )
                   }}
                 id: unplugged
-            timeout: "01:00:00"
-            continue_on_timeout: true
+  - variables:
+      plan_choice: >-
+        {{ wait.trigger.id if wait.trigger is not none else 'unplugged' }}
 
-          - variables:
-              charge_limit: >-
-                {{ wait.trigger.id if wait.trigger is not none else 'timed_out' }}
+  - action: notify.mobile_app_primary_phone
+    continue_on_error: true
+    data:
+      message: clear_notification
+      data:
+        tag: hems_ev_connection_charge_plan
+  - action: notify.mobile_app_secondary_ev_phone
+    continue_on_error: true
+    data:
+      message: clear_notification
+      data:
+        tag: hems_ev_connection_charge_plan
 
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ plan_choice == 'solar_only' }}"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_ev_connection_charge_plan
+            data:
+              option: Solar Only
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.hems_ev_recovery_approved
+                - input_boolean.ev_expected_back_today
           - action: notify.mobile_app_primary_phone
             continue_on_error: true
             data:
-              message: clear_notification
+              title: HEMS EV plan saved
+              message: >-
+                Solar Only selected. Grid charging is blocked for this
+                connection. No SOC target applies to this plan; genuine/native
+                excess solar may charge the EV whenever surplus is available,
+                up to the vehicle's physical full state.
               data:
-                tag: hems_ev_30_50_choice
+                tag: hems_ev_connection_charge_plan_result
           - action: notify.mobile_app_secondary_ev_phone
             continue_on_error: true
             data:
-              message: clear_notification
+              title: HEMS EV plan saved
+              message: >-
+                Solar Only selected. Grid charging is blocked for this
+                connection. No SOC target applies to this plan; genuine/native
+                excess solar may charge the EV whenever surplus is available,
+                up to the vehicle's physical full state.
               data:
-                tag: hems_ev_30_50_choice
+                tag: hems_ev_connection_charge_plan_result
+
+      - conditions:
+          - condition: template
+            value_template: "{{ plan_choice in ['cheap_grid', 'charge_now'] }}"
+        sequence:
+          - variables:
+              selected_plan_label: >-
+                {{ 'Cheap Grid' if plan_choice == 'cheap_grid' else 'Charge Now' }}
+          - action: notify.mobile_app_primary_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charge target
+              message: >-
+                {{ selected_plan_label }} selected. Should HEMS charge the EV
+                to the normal {{ normal_ev_target }}% target or charge it to
+                100%?
+              data:
+                tag: hems_ev_connection_charge_plan
+                actions:
+                  - action: HEMS_EV_CHARGE_TO_TARGET
+                    title: Charge to Target
+                  - action: HEMS_EV_CHARGE_TO_FULL
+                    title: Charge to Full
+          - action: notify.mobile_app_secondary_ev_phone
+            continue_on_error: true
+            data:
+              title: HEMS EV charge target
+              message: >-
+                {{ selected_plan_label }} selected. Should HEMS charge the EV
+                to the normal {{ normal_ev_target }}% target or charge it to
+                100%?
+              data:
+                tag: hems_ev_connection_charge_plan
+                actions:
+                  - action: HEMS_EV_CHARGE_TO_TARGET
+                    title: Charge to Target
+                  - action: HEMS_EV_CHARGE_TO_FULL
+                    title: Charge to Full
+
+          - wait_for_trigger:
+              - trigger: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: HEMS_EV_CHARGE_TO_TARGET
+                id: charge_to_target
+              - trigger: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: HEMS_EV_CHARGE_TO_FULL
+                id: charge_to_full
+              - trigger: template
+                value_template: >-
+                  {{
+                    is_state('binary_sensor.atto_3_plug', 'off')
+                    and is_state(
+                      'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                      'off'
+                    )
+                  }}
+                id: unplugged
+            timeout: "00:15:00"
+            continue_on_timeout: true
+
+          - variables:
+              initial_target_choice: >-
+                {{ wait.trigger.id if wait.trigger is not none else 'timed_out' }}
 
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ charge_limit == 'until_unplugged' }}"
-                sequence:
-                  - action: input_boolean.turn_off
-                    target:
-                      entity_id: input_boolean.ev_expected_back_today
-                  - action: input_boolean.turn_on
-                    target:
-                      entity_id: input_boolean.hems_ev_recovery_approved
-
-              - conditions:
-                  - condition: template
-                    value_template: "{{ charge_limit == 'until_target' }}"
-                sequence:
-                  - action: input_boolean.turn_on
-                    target:
-                      entity_id:
-                        - input_boolean.hems_ev_recovery_approved
-                        - input_boolean.ev_expected_back_today
-
-              - conditions:
-                  - condition: template
-                    value_template: "{{ charge_limit == 'until_full' }}"
-                sequence:
-                  - action: input_boolean.turn_on
-                    target:
-                      entity_id:
-                        - input_boolean.hems_ev_long_drive_today
-                        - input_boolean.hems_ev_recovery_approved
-                        - input_boolean.ev_expected_back_today
-
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: >-
-                      {{ charge_limit in [
-                        'until_unplugged',
-                        'until_target',
-                        'until_full'
-                      ] }}
+                    value_template: "{{ initial_target_choice == 'timed_out' }}"
                 sequence:
                   - action: notify.mobile_app_primary_phone
                     continue_on_error: true
                     data:
-                      title: HEMS EV charge-now approved
+                      title: HEMS EV charge target
                       message: >-
-                        Immediate charging was approved {{
-                          charge_limit | replace('_', ' ')
-                        }}. HEMS will apply the time-sensitive Powerwall policy
-                        and the guarded EV Worker will remain the sole charger
-                        controller.
+                        Reminder: choose Charge to Target or Charge to Full to
+                        complete the {{ selected_plan_label }} plan.
                       data:
-                        tag: hems_ev_30_50_result
-                        alert_once: true
+                        tag: hems_ev_connection_charge_plan
+                        actions:
+                          - action: HEMS_EV_CHARGE_TO_TARGET
+                            title: Charge to Target
+                          - action: HEMS_EV_CHARGE_TO_FULL
+                            title: Charge to Full
                   - action: notify.mobile_app_secondary_ev_phone
                     continue_on_error: true
                     data:
-                      title: HEMS EV charge-now approved
+                      title: HEMS EV charge target
                       message: >-
-                        Immediate charging was approved {{
-                          charge_limit | replace('_', ' ')
-                        }}. HEMS will apply the time-sensitive Powerwall policy
-                        and the guarded EV Worker will remain the sole charger
-                        controller.
+                        Reminder: choose Charge to Target or Charge to Full to
+                        complete the {{ selected_plan_label }} plan.
                       data:
-                        tag: hems_ev_30_50_result
-                        alert_once: true
-            default:
-              - action: notify.mobile_app_primary_phone
-                continue_on_error: true
-                data:
-                  title: HEMS EV choice timed out
-                  message: >-
-                    No charge-now limit was selected. HEMS made no approval
-                    change and normal planning remains in control.
-                  data:
-                    tag: hems_ev_30_50_result
-                    alert_once: true
-              - action: notify.mobile_app_secondary_ev_phone
-                continue_on_error: true
-                data:
-                  title: HEMS EV choice timed out
-                  message: >-
-                    No charge-now limit was selected. HEMS made no approval
-                    change and normal planning remains in control.
-                  data:
-                    tag: hems_ev_30_50_result
-                    alert_once: true
+                        tag: hems_ev_connection_charge_plan
+                        actions:
+                          - action: HEMS_EV_CHARGE_TO_TARGET
+                            title: Charge to Target
+                          - action: HEMS_EV_CHARGE_TO_FULL
+                            title: Charge to Full
+                  - wait_for_trigger:
+                      - trigger: event
+                        event_type: mobile_app_notification_action
+                        event_data:
+                          action: HEMS_EV_CHARGE_TO_TARGET
+                        id: charge_to_target
+                      - trigger: event
+                        event_type: mobile_app_notification_action
+                        event_data:
+                          action: HEMS_EV_CHARGE_TO_FULL
+                        id: charge_to_full
+                      - trigger: template
+                        value_template: >-
+                          {{
+                            is_state('binary_sensor.atto_3_plug', 'off')
+                            and is_state(
+                              'binary_sensor.solaredge_ev_charger_ev_charger_connected',
+                              'off'
+                            )
+                          }}
+                        id: unplugged
+          - variables:
+              target_choice: >-
+                {{ wait.trigger.id if wait.trigger is not none else 'unplugged' }}
 
-      - conditions:
-          - condition: template
-            value_template: "{{ first_choice == 'decide_later' }}"
-        sequence:
           - action: notify.mobile_app_primary_phone
             continue_on_error: true
             data:
-              title: HEMS EV decision deferred
-              message: >-
-                No immediate charging approval was recorded. Normal planning
-                remains active for this connection.
+              message: clear_notification
               data:
-                tag: hems_ev_30_50_result
-                alert_once: true
+                tag: hems_ev_connection_charge_plan
           - action: notify.mobile_app_secondary_ev_phone
             continue_on_error: true
             data:
-              title: HEMS EV decision deferred
-              message: >-
-                No immediate charging approval was recorded. Normal planning
-                remains active for this connection.
+              message: clear_notification
               data:
-                  tag: hems_ev_30_50_result
-                  alert_once: true
+                tag: hems_ev_connection_charge_plan
 
-  - wait_template: >-
-      {{
-        is_state('binary_sensor.atto_3_plug', 'off')
-        and is_state(
-          'binary_sensor.solaredge_ev_charger_ev_charger_connected',
-          'off'
-        )
-      }}
-    timeout: "18:00:00"
-    continue_on_timeout: true
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ target_choice == 'charge_to_target' }}"
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.hems_ev_long_drive_today
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_ev_connection_charge_plan
+                    data:
+                      option: >-
+                        {{ 'Cheap Grid' if plan_choice == 'cheap_grid' else 'Charge Now' }}
+
+              - conditions:
+                  - condition: template
+                    value_template: "{{ target_choice == 'charge_to_full' }}"
+                sequence:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: input_boolean.hems_ev_long_drive_today
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_ev_connection_charge_plan
+                    data:
+                      option: >-
+                        {{ 'Cheap Grid' if plan_choice == 'cheap_grid' else 'Charge Now' }}
+
+          - if:
+              - condition: template
+                value_template: >-
+                  {{
+                    target_choice in ['charge_to_target', 'charge_to_full']
+                    and plan_choice == 'cheap_grid'
+                  }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_ev_recovery_approved
+                    - input_boolean.ev_expected_back_today
+
+          - if:
+              - condition: template
+                value_template: >-
+                  {{
+                    target_choice in ['charge_to_target', 'charge_to_full']
+                    and plan_choice == 'charge_now'
+                  }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id:
+                    - input_boolean.hems_ev_recovery_approved
+                    - input_boolean.ev_expected_back_today
+
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ target_choice in ['charge_to_target', 'charge_to_full'] }}
+            then:
+              - action: notify.mobile_app_primary_phone
+                continue_on_error: true
+                data:
+                  title: HEMS EV plan saved
+                  message: >-
+                    {{ selected_plan_label }} was approved to
+                    {{ '100% full' if target_choice == 'charge_to_full' else
+                    (normal_ev_target ~ '%') }}. The guarded EV Worker remains
+                    the sole full-rate charger controller.
+                  data:
+                    tag: hems_ev_connection_charge_plan_result
+              - action: notify.mobile_app_secondary_ev_phone
+                continue_on_error: true
+                data:
+                  title: HEMS EV plan saved
+                  message: >-
+                    {{ selected_plan_label }} was approved to
+                    {{ '100% full' if target_choice == 'charge_to_full' else
+                    (normal_ev_target ~ '%') }}. The guarded EV Worker remains
+                    the sole full-rate charger controller.
+                  data:
+                    tag: hems_ev_connection_charge_plan_result
+
 mode: single
 max_exceeded: silent

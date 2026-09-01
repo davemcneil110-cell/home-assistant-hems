@@ -1,0 +1,1046 @@
+# HEMS Solar / Powerwall SOC Cycle - SAFE COMMISSIONING PACKAGE
+#
+# Revised 2026-09-01 after the first live curtailment cycle. This coordinator changes only its
+# own helpers; SolarEdge/Tesla writes remain serialised through the existing
+# Solar Worker and Powerwall Worker when Live Control is explicitly enabled.
+#
+# Approved policy:
+# - Enter only when feed-in is at/below input_number.minimum_grid_feed, the
+#   Powerwall has reached the independent intraday cycle floor, and either the EV has satisfied its
+#   authorised target or an away EV was explicitly confirmed not returning.
+#   Solar Only remains an open opportunity through 100%.
+# - DISCHARGE requests a 100 W solar export limit, Self-Consumption and a
+#   Powerwall reserve equal to the 90% cycle floor. At the configured end-of-day
+#   protection time, a higher daily Powerwall target also becomes protected.
+# - At the effective floor, RECOVERY requests the normal 5000 W solar export
+#   limit and Self-Consumption while continuing to protect the cycle floor.
+#   After the protection time, recovered SOC is ratcheted toward the daily
+#   target without ever requesting a reserve above the measured SOC.
+# - A live cycle is SOC-driven. Ordinary price changes do not interrupt it.
+# - At 100% rearm, another cycle starts only if price, forecast and two-hour
+#   runway admission tests still pass. Otherwise RECOVERY holds the protected
+#   SOC until the solar day ends instead of releasing to the 20% reserve.
+# - A connected EV with unmet authorised demand (or unavailable SOC/target),
+#   Storm Watch, manual override, solar end, an active grid charge/export
+#   session, or a rare high-value feed-in price is a safety exit.
+
+input_boolean:
+  hems_solar_powerwall_soc_cycle_planning_enabled:
+    name: HEMS Solar Powerwall SOC Cycle Planning
+    icon: mdi:battery-sync-outline
+    initial: false
+
+  hems_solar_powerwall_soc_cycle_live_control_enabled:
+    name: HEMS Solar Powerwall SOC Cycle Live Control
+    icon: mdi:shield-lock-outline
+    initial: false
+
+  hems_solar_powerwall_soc_cycle_simulation_enabled:
+    name: HEMS Solar Powerwall SOC Cycle Simulation
+    icon: mdi:test-tube
+    initial: false
+
+  hems_solar_powerwall_soc_cycle_simulated_ev_away:
+    name: HEMS SOC Cycle Simulated EV Away
+    icon: mdi:car-arrow-right
+    initial: false
+
+  hems_solar_powerwall_soc_cycle_simulated_admission_guards_pass:
+    name: HEMS SOC Cycle Simulated Forecast and Runway Pass
+    icon: mdi:shield-check-outline
+    initial: false
+
+  hems_ev_not_returning_confirmed_today:
+    name: HEMS EV Not Returning Confirmed Today
+    icon: mdi:car-off
+    initial: false
+
+input_select:
+  hems_solar_powerwall_soc_cycle_phase:
+    name: HEMS Solar Powerwall SOC Cycle Phase
+    icon: mdi:state-machine
+    options:
+      - IDLE
+      - DISCHARGE
+      - RECOVERY
+      - SAFETY_EXIT
+    initial: IDLE
+
+input_number:
+  hems_solar_powerwall_soc_cycle_simulated_powerwall_soc:
+    name: HEMS SOC Cycle Simulated Powerwall SOC
+    icon: mdi:battery-sync
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    initial: 100
+
+  hems_solar_powerwall_soc_cycle_simulated_feed_in_price:
+    name: HEMS SOC Cycle Simulated Feed-In Price
+    icon: mdi:cash-clock
+    min: -1
+    max: 50
+    step: 0.01
+    unit_of_measurement: AUD/kWh
+    mode: box
+    initial: 0
+
+  hems_solar_powerwall_soc_cycle_rearm_soc:
+    name: HEMS Solar Powerwall SOC Cycle Rearm SOC
+    icon: mdi:battery-charging-100
+    min: 90
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    initial: 100
+
+  hems_solar_powerwall_soc_cycle_floor:
+    name: HEMS Solar Powerwall SOC Cycle Floor
+    icon: mdi:battery-90
+    min: 50
+    max: 99
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    initial: 90
+
+  hems_solar_powerwall_soc_cycle_minimum_runway:
+    name: HEMS Solar Powerwall SOC Cycle Minimum Runway
+    icon: mdi:timer-sand
+    min: 30
+    max: 240
+    step: 15
+    unit_of_measurement: min
+    mode: box
+    initial: 120
+
+input_datetime:
+  hems_solar_powerwall_soc_cycle_end_of_day_protection_time:
+    name: HEMS SOC Cycle End-of-Day Protection Time
+    icon: mdi:shield-clock-outline
+    has_date: false
+    has_time: true
+    initial: "15:00:00"
+
+template:
+  - sensor:
+      - name: HEMS Solar Powerwall SOC Cycle Coordinator
+        unique_id: hems_solar_powerwall_soc_cycle_coordinator_v1
+        icon: mdi:battery-sync
+        state: >-
+          {{ states('input_select.hems_solar_powerwall_soc_cycle_phase') }}
+        attributes:
+          commissioning_mode: >-
+            {{
+              is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+                'off'
+              )
+            }}
+          planning_enabled: >-
+            {{
+              is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_planning_enabled',
+                'on'
+              )
+            }}
+          live_control_enabled: >-
+            {{
+              is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+                'on'
+              )
+            }}
+          simulation_active: >-
+            {{
+              is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+                'on'
+              )
+              and is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+                'off'
+              )
+            }}
+          ev_not_returning_confirmed: >-
+            {{
+              is_state(
+                'input_boolean.hems_ev_not_returning_confirmed_today', 'on'
+              )
+            }}
+          ev_home_connected: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% if simulation %}
+              {{
+                not is_state(
+                  'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+                  'on'
+                )
+              }}
+            {% else %}
+              {{
+                is_state(
+                  'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+                )
+              }}
+            {% endif %}
+          ev_soc: >-
+            {{ states('sensor.hems_effective_ev_soc') }}
+          ev_curtailment_block: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% set ev_home = not is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+              'on'
+            ) if simulation else is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            ) %}
+            {{
+              ev_home if simulation
+              else states('sensor.hems_ev_curtailment_demand') != 'CLEAR'
+            }}
+          ev_return_guard_pass: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% set ev_home = not is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+              'on'
+            ) if simulation else is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            ) %}
+            {{
+              is_state(
+                'input_boolean.hems_ev_not_returning_confirmed_today', 'on'
+              )
+              or (
+                not simulation
+                and state_attr(
+                  'sensor.hems_ev_curtailment_demand',
+                  'authorised_demand_satisfied'
+                ) == true
+              )
+            }}
+          storm_watch_state: >-
+            {{
+              states(
+                'binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active'
+              )
+            }}
+          feed_in_price: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {{
+              states(
+                'input_number.hems_solar_powerwall_soc_cycle_simulated_feed_in_price'
+              )
+              if simulation
+              else states('sensor.hems_effective_feed_in_price')
+            }}
+          minimum_grid_feed: >-
+            {{ states('input_number.minimum_grid_feed') }}
+          high_value_export_price: >-
+            {{ states('input_number.battery_export_feed_in_price') }}
+          powerwall_soc: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {{
+              states(
+                'input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc'
+              )
+              if simulation
+              else states('sensor.hems_effective_powerwall')
+            }}
+          powerwall_cycle_floor: >-
+            {{ states('input_number.hems_solar_powerwall_soc_cycle_floor') }}
+          powerwall_end_of_day_target: >-
+            {{ states('input_number.powerwall_target') }}
+          powerwall_target: >-
+            {{ states('input_number.powerwall_target') }}
+          powerwall_rearm_soc: >-
+            {{ states('input_number.hems_solar_powerwall_soc_cycle_rearm_soc') }}
+          minimum_powerwall_reserve: >-
+            {{ states('input_number.minimum_power_reserve') }}
+          desired_solar_export_limit: >-
+            {% set phase = states(
+              'input_select.hems_solar_powerwall_soc_cycle_phase'
+            ) %}
+            {% if phase == 'DISCHARGE' %}
+              {{ states('input_number.hems_solar_minimum_export_limit') }}
+            {% elif phase == 'RECOVERY' %}
+              {{ states('input_number.maximum_solar_export') }}
+            {% else %}
+              NO_REQUEST
+            {% endif %}
+          desired_powerwall_mode: >-
+            {% if states(
+              'input_select.hems_solar_powerwall_soc_cycle_phase'
+            ) in ['DISCHARGE', 'RECOVERY'] %}
+              self_consumption
+            {% else %}
+              NO_REQUEST
+            {% endif %}
+          desired_powerwall_reserve: >-
+            {% set phase = states(
+              'input_select.hems_solar_powerwall_soc_cycle_phase'
+            ) %}
+            {% set floor_raw = states(
+              'input_number.hems_solar_powerwall_soc_cycle_floor'
+            ) %}
+            {% set target_raw = states('input_number.powerwall_target') %}
+            {% set minimum_raw = states('input_number.minimum_power_reserve') %}
+            {% set time_raw = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% set soc_raw = states(
+              'input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc'
+            ) if simulation else states('sensor.hems_effective_powerwall') %}
+            {% set protection_active = time_raw not in [
+              'unknown', 'unavailable', 'none', ''
+            ] and as_timestamp(now()) >= as_timestamp(today_at(time_raw)) %}
+            {% if phase in ['DISCHARGE', 'RECOVERY']
+                  and is_number(floor_raw) and is_number(minimum_raw) %}
+              {% set base = [floor_raw | float, minimum_raw | float] | max %}
+              {% if phase == 'DISCHARGE' and protection_active
+                    and is_number(target_raw) %}
+                {{ [base, target_raw | float] | max | round(0) }}
+              {% elif phase == 'RECOVERY' and protection_active
+                    and is_number(target_raw) and is_number(soc_raw) %}
+                {% set recovered = [soc_raw | float, target_raw | float] | min %}
+                {{ [base, recovered] | max | round(0) }}
+              {% else %}
+                {{ base | round(0) }}
+              {% endif %}
+            {% else %}
+              NO_REQUEST
+            {% endif %}
+          end_of_day_protection_time: >-
+            {{ states('input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time') }}
+          end_of_day_protection_active: >-
+            {% set value = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {{
+              value not in ['unknown', 'unavailable', 'none', '']
+              and as_timestamp(now()) >= as_timestamp(today_at(value))
+            }}
+          effective_discharge_floor: >-
+            {% set floor = states(
+              'input_number.hems_solar_powerwall_soc_cycle_floor'
+            ) %}
+            {% set target = states('input_number.powerwall_target') %}
+            {% set value = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {% set protection_active = value not in [
+              'unknown', 'unavailable', 'none', ''
+            ] and as_timestamp(now()) >= as_timestamp(today_at(value)) %}
+            {% if is_number(floor) %}
+              {{
+                [floor | float, target | float] | max | round(0)
+                if protection_active and is_number(target)
+                else floor | float | round(0)
+              }}
+            {% else %}
+              unavailable
+            {% endif %}
+          minimum_runway_minutes: >-
+            {{
+              states(
+                'input_number.hems_solar_powerwall_soc_cycle_minimum_runway'
+              )
+            }}
+          minutes_to_end_of_day_protection: >-
+            {% set value = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {% if value not in ['unknown', 'unavailable', 'none', ''] %}
+              {% set deadline = today_at(value) %}
+              {{ ((as_timestamp(deadline) - as_timestamp(now())) / 60) | round(0) }}
+            {% else %}
+              unavailable
+            {% endif %}
+          forecast_headroom_kwh: >-
+            {% set forecast = states(
+              'sensor.solcast_pv_forecast_forecast_remaining_today'
+            ) %}
+            {% set house = states('sensor.house_energy_remaining_today') %}
+            {% set floor = states(
+              'input_number.hems_solar_powerwall_soc_cycle_floor'
+            ) %}
+            {% set rearm = states(
+              'input_number.hems_solar_powerwall_soc_cycle_rearm_soc'
+            ) %}
+            {% set capacity_raw = states(
+              'input_number.hems_powerwall_usable_capacity'
+            ) %}
+            {% set capacity = capacity_raw | float(13.5)
+              if is_number(capacity_raw) else 13.5 %}
+            {% if is_number(forecast) and is_number(house)
+                  and is_number(floor) and is_number(rearm) %}
+              {% set recharge = [
+                ((rearm | float) - (floor | float)) / 100 * capacity, 0
+              ] | max %}
+              {{ ((forecast | float) - (house | float) - recharge) | round(2) }}
+            {% else %}
+              unavailable
+            {% endif %}
+          admission_ready: >-
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% set simulated_away = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+              'on'
+            ) %}
+            {% set ev_home = not simulated_away if simulation else is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            ) %}
+            {% set ev_curtailment_block = ev_home if simulation
+              else states('sensor.hems_ev_curtailment_demand') != 'CLEAR' %}
+            {% set ev_return_guard_pass = is_state(
+              'input_boolean.hems_ev_not_returning_confirmed_today', 'on'
+            ) or (
+              not simulation
+              and state_attr(
+                'sensor.hems_ev_curtailment_demand',
+                'authorised_demand_satisfied'
+              ) == true
+            ) %}
+            {% set price = states(
+              'input_number.hems_solar_powerwall_soc_cycle_simulated_feed_in_price'
+            ) if simulation else states('sensor.hems_effective_feed_in_price') %}
+            {% set threshold = states('input_number.minimum_grid_feed') %}
+            {% set soc = states(
+              'input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc'
+            ) if simulation else states('sensor.hems_effective_powerwall') %}
+            {% set floor = states(
+              'input_number.hems_solar_powerwall_soc_cycle_floor'
+            ) %}
+            {% set end_target = states('input_number.powerwall_target') %}
+            {% set protection_time = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {% set runway = states(
+              'input_number.hems_solar_powerwall_soc_cycle_minimum_runway'
+            ) %}
+            {% set storm = states(
+              'binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active'
+            ) %}
+            {% set grid_plan = states('sensor.hems_powerwall_grid_charge_plan') %}
+            {% set forecast = states(
+              'sensor.solcast_pv_forecast_forecast_remaining_today'
+            ) %}
+            {% set house = states('sensor.house_energy_remaining_today') %}
+            {% set rearm = states(
+              'input_number.hems_solar_powerwall_soc_cycle_rearm_soc'
+            ) %}
+            {% set capacity_raw = states(
+              'input_number.hems_powerwall_usable_capacity'
+            ) %}
+            {% set capacity = capacity_raw | float(13.5)
+              if is_number(capacity_raw) else 13.5 %}
+            {% set margin_raw = states(
+              'input_number.hems_solar_forecast_reserve_margin'
+            ) %}
+            {% set margin = margin_raw | float(1)
+              if is_number(margin_raw) else 1 %}
+            {% set deadline = today_at(protection_time)
+              if protection_time not in ['unknown', 'unavailable', 'none', '']
+              else none %}
+            {% set recharge = [
+              ((rearm | float(100)) - (floor | float(100))) / 100 * capacity,
+              0
+            ] | max %}
+            {% set forecast_ok = is_number(forecast) and is_number(house)
+              and ((forecast | float) - (house | float) - recharge) >= margin %}
+            {% set simulated_guards = simulation and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_admission_guards_pass',
+              'on'
+            ) %}
+            {% set runway_ok = deadline is not none and is_number(runway)
+              and as_timestamp(now())
+                <= as_timestamp(deadline) - ((runway | float) * 60) %}
+            {{
+              is_state(
+                'input_boolean.hems_solar_powerwall_soc_cycle_planning_enabled',
+                'on'
+              )
+              and ev_return_guard_pass
+              and not ev_curtailment_block
+              and storm == 'off'
+              and is_state('input_boolean.hems_solar_manual_override', 'off')
+              and is_state('input_boolean.hems_powerwall_manual_override', 'off')
+              and is_state(
+                'input_boolean.hems_solar_automatic_control_enabled', 'on'
+              )
+              and is_number(price)
+              and is_number(threshold)
+              and (price | float) <= (threshold | float)
+              and is_number(soc)
+              and is_number(floor)
+              and is_number(end_target)
+              and is_number(rearm)
+              and (floor | float) < (rearm | float)
+              and (end_target | float) <= (rearm | float)
+              and (soc | float) + 0.5 >= (floor | float)
+              and (simulated_guards or runway_ok)
+              and (simulated_guards or forecast_ok)
+              and grid_plan not in [
+                'CHARGE_CHEAPEST_VISIBLE', 'CHARGE_LATEST_SAFE_START'
+              ]
+              and is_state(
+                'input_boolean.hems_powerwall_export_session_active', 'off'
+              )
+              and is_state(
+                'input_boolean.hems_powerwall_export_simulated_session_active',
+                'off'
+              )
+              and not is_state('sun.sun', 'below_horizon')
+            }}
+          decision_reason: >-
+            {% set phase = states(
+              'input_select.hems_solar_powerwall_soc_cycle_phase'
+            ) %}
+            {% set simulation = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+              'on'
+            ) and is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'off'
+            ) %}
+            {% set simulated_away = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+              'on'
+            ) %}
+            {% set ev_home = not simulated_away if simulation else is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            ) %}
+            {% set ev_curtailment_block = ev_home if simulation
+              else states('sensor.hems_ev_curtailment_demand') != 'CLEAR' %}
+            {% set ev_return_guard_pass = is_state(
+              'input_boolean.hems_ev_not_returning_confirmed_today', 'on'
+            ) or (
+              not simulation
+              and state_attr(
+                'sensor.hems_ev_curtailment_demand',
+                'authorised_demand_satisfied'
+              ) == true
+            ) %}
+            {% set price = states(
+              'input_number.hems_solar_powerwall_soc_cycle_simulated_feed_in_price'
+            ) if simulation else states('sensor.hems_effective_feed_in_price') %}
+            {% set threshold = states('input_number.minimum_grid_feed') %}
+            {% set high = states('input_number.battery_export_feed_in_price') %}
+            {% set soc = states(
+              'input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc'
+            ) if simulation else states('sensor.hems_effective_powerwall') %}
+            {% set floor = states(
+              'input_number.hems_solar_powerwall_soc_cycle_floor'
+            ) %}
+            {% set target = states('input_number.powerwall_target') %}
+            {% set rearm = states(
+              'input_number.hems_solar_powerwall_soc_cycle_rearm_soc'
+            ) %}
+            {% set protection_time = states(
+              'input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time'
+            ) %}
+            {% set protection_active = protection_time not in [
+              'unknown', 'unavailable', 'none', ''
+            ] and as_timestamp(now()) >= as_timestamp(today_at(protection_time)) %}
+            {% set effective_floor = [floor | float, target | float] | max
+              if protection_active and is_number(floor) and is_number(target)
+              else floor | float if is_number(floor) else none %}
+            {% if not is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_planning_enabled',
+              'on'
+            ) %}
+              PLANNING_DISABLED
+            {% elif ev_curtailment_block %}
+              EV_AUTHORISED_CHARGING_DEMAND_CURTAILMENT_BLOCKED
+            {% elif not ev_return_guard_pass %}
+              WAITING_FOR_EXPLICIT_EV_NOT_RETURNING_CONFIRMATION
+            {% elif states(
+              'binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active'
+            ) not in ['on', 'off'] %}
+              STORM_WATCH_INPUT_UNAVAILABLE
+            {% elif is_state(
+              'binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active',
+              'on'
+            ) %}
+              STORM_WATCH_ACTIVE
+            {% elif is_state('input_boolean.hems_solar_manual_override', 'on')
+                  or is_state(
+                    'input_boolean.hems_powerwall_manual_override', 'on'
+                  ) %}
+              MANUAL_OVERRIDE_ACTIVE
+            {% elif is_state('sun.sun', 'below_horizon') %}
+              SOLAR_FINISHED
+            {% elif is_number(price) and is_number(high)
+                  and (price | float) >= (high | float) %}
+              HIGH_VALUE_EXPORT_OVERRIDE
+            {% elif not is_number(floor) or not is_number(rearm)
+                  or (floor | float) >= (rearm | float) %}
+              INVALID_SOC_CYCLE_FLOOR_OR_REARM
+            {% elif not is_number(target) or (target | float) > (rearm | float) %}
+              INVALID_END_OF_DAY_TARGET_ABOVE_REARM_SOC
+            {% elif phase == 'DISCHARGE' and is_number(soc)
+                  and effective_floor is not none
+                  and (soc | float) > (effective_floor | float) + 0.5 %}
+              {{
+                'DISCHARGE_TO_END_OF_DAY_PROTECTED_TARGET'
+                if protection_active
+                else 'DISCHARGE_TO_INTRADAY_CYCLE_FLOOR'
+              }}
+            {% elif phase == 'RECOVERY' %}
+              RECOVER_WITH_SOLAR_AND_PROTECTED_SOC_FLOOR
+            {% elif not is_number(price) or not is_number(threshold) %}
+              PRICE_INPUT_UNAVAILABLE
+            {% elif (price | float) > (threshold | float) %}
+              FEED_IN_PRICE_ABOVE_MINIMUM_GRID_FEED
+            {% else %}
+              WAITING_FOR_ADMISSION_GUARDS
+            {% endif %}
+
+automation:
+  - id: hems_ev_not_returning_confirmation_latch_20260830
+    alias: HEMS - EV Not Returning Confirmation Latch
+    description: >-
+      Records only the explicit Not returning today mobile response. The older
+      EV Expected Back Today helper is deliberately not treated as confirmation.
+    mode: queued
+    max: 5
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: HEMS_EV_NOT_RETURNING
+        id: explicit_not_returning
+
+      - platform: state
+        entity_id: binary_sensor.solaredge_ev_charger_ev_charger_connected
+        to: "on"
+        id: ev_reconnected
+
+      - platform: state
+        entity_id: input_boolean.ev_expected_back_today
+        to: "on"
+        id: expected_back_enabled
+
+      - platform: time
+        at: "00:00:00"
+        id: midnight_reset
+    condition: []
+    action:
+      - choose:
+          - conditions: "{{ trigger.id == 'explicit_not_returning' }}"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.hems_ev_not_returning_confirmed_today
+        default:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.hems_ev_not_returning_confirmed_today
+
+  - id: hems_solar_powerwall_soc_cycle_commissioning_20260830
+    alias: HEMS - Solar Powerwall SOC Cycle Commissioning
+    description: >-
+      Maintains the simulated SOC-driven cycle phase. It never writes to
+      SolarEdge or Tesla.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_boolean.hems_solar_powerwall_soc_cycle_planning_enabled
+          - input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled
+          - input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled
+          - input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away
+          - input_boolean.hems_solar_powerwall_soc_cycle_simulated_admission_guards_pass
+          - input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc
+          - input_number.hems_solar_powerwall_soc_cycle_simulated_feed_in_price
+          - input_boolean.hems_ev_not_returning_confirmed_today
+          - binary_sensor.solaredge_ev_charger_ev_charger_connected
+          - binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active
+          - sensor.hems_effective_feed_in_price
+          - input_number.minimum_grid_feed
+          - input_number.battery_export_feed_in_price
+          - sensor.hems_effective_powerwall
+          - input_number.powerwall_target
+          - input_number.hems_solar_powerwall_soc_cycle_floor
+          - input_number.minimum_power_reserve
+          - input_number.hems_solar_powerwall_soc_cycle_rearm_soc
+          - input_number.hems_solar_powerwall_soc_cycle_minimum_runway
+          - input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time
+          - sensor.solcast_pv_forecast_forecast_remaining_today
+          - sensor.house_energy_remaining_today
+          - sensor.hems_powerwall_grid_charge_plan
+          - input_boolean.hems_powerwall_export_session_active
+          - input_boolean.hems_powerwall_export_simulated_session_active
+          - input_boolean.hems_solar_manual_override
+          - input_boolean.hems_powerwall_manual_override
+          - input_boolean.hems_solar_automatic_control_enabled
+          - sun.sun
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: homeassistant
+        event: start
+    condition: []
+    variables:
+      phase: >-
+        {{ states('input_select.hems_solar_powerwall_soc_cycle_phase') }}
+      planning_enabled: >-
+        {{
+          is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_planning_enabled', 'on'
+          )
+        }}
+      live_control_enabled: >-
+        {{
+          is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+            'on'
+          )
+        }}
+      simulation_active: >-
+        {{
+          is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_simulation_enabled',
+            'on'
+          )
+          and not live_control_enabled
+        }}
+      simulated_admission_guards: >-
+        {{
+          simulation_active
+          and is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_simulated_admission_guards_pass',
+            'on'
+          )
+        }}
+      ev_home_connected: >-
+        {% if simulation_active %}
+          {{
+            not is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_simulated_ev_away',
+              'on'
+            )
+          }}
+        {% else %}
+          {{
+            is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            )
+          }}
+        {% endif %}
+      ev_soc_raw: "{{ states('sensor.hems_effective_ev_soc') }}"
+      ev_curtailment_block: >-
+        {{
+          ev_home_connected if simulation_active
+          else states('sensor.hems_ev_curtailment_demand') != 'CLEAR'
+        }}
+      ev_not_returning: >-
+        {{
+          is_state(
+            'input_boolean.hems_ev_not_returning_confirmed_today', 'on'
+          )
+        }}
+      ev_return_guard_pass: >-
+        {{
+          ev_not_returning
+          or (
+            not simulation_active
+            and state_attr(
+              'sensor.hems_ev_curtailment_demand',
+              'authorised_demand_satisfied'
+            ) == true
+          )
+        }}
+      storm_state: >-
+        {{
+          states(
+            'binary_sensor.house_home_energy_gateway_teslemetry_storm_watch_active'
+          )
+        }}
+      solar_finished: >-
+        {% set solar = states('sensor.hems_effective_solar_power') %}
+        {% set remaining = states(
+          'sensor.solcast_pv_forecast_forecast_remaining_today'
+        ) %}
+        {{
+          is_state('sun.sun', 'below_horizon')
+          or (
+            is_number(solar)
+            and (solar | float) <= 0.05
+            and is_number(remaining)
+            and (remaining | float) <= 0.05
+          )
+        }}
+      price_raw: >-
+        {{
+          states(
+            'input_number.hems_solar_powerwall_soc_cycle_simulated_feed_in_price'
+          )
+          if simulation_active
+          else states('sensor.hems_effective_feed_in_price')
+        }}
+      threshold_raw: "{{ states('input_number.minimum_grid_feed') }}"
+      high_value_raw: >-
+        {{ states('input_number.battery_export_feed_in_price') }}
+      soc_raw: >-
+        {{
+          states(
+            'input_number.hems_solar_powerwall_soc_cycle_simulated_powerwall_soc'
+          )
+          if simulation_active
+          else states('sensor.hems_effective_powerwall')
+        }}
+      cycle_floor_raw: >-
+        {{ states('input_number.hems_solar_powerwall_soc_cycle_floor') }}
+      end_of_day_target_raw: "{{ states('input_number.powerwall_target') }}"
+      rearm_raw: >-
+        {{ states('input_number.hems_solar_powerwall_soc_cycle_rearm_soc') }}
+      protection_time_raw: >-
+        {{ states('input_datetime.hems_solar_powerwall_soc_cycle_end_of_day_protection_time') }}
+      runway_raw: >-
+        {{
+          states(
+            'input_number.hems_solar_powerwall_soc_cycle_minimum_runway'
+          )
+        }}
+      forecast_raw: >-
+        {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') }}
+      house_raw: "{{ states('sensor.house_energy_remaining_today') }}"
+      capacity_raw: >-
+        {{ states('input_number.hems_powerwall_usable_capacity') }}
+      capacity: >-
+        {{ capacity_raw | float(13.5) if is_number(capacity_raw) else 13.5 }}
+      margin_raw: >-
+        {{ states('input_number.hems_solar_forecast_reserve_margin') }}
+      margin: >-
+        {{ margin_raw | float(1) if is_number(margin_raw) else 1 }}
+      recharge_energy: >-
+        {% if is_number(cycle_floor_raw) and is_number(rearm_raw) %}
+          {{
+            ([
+              ((rearm_raw | float) - (cycle_floor_raw | float)) / 100
+                * (capacity | float),
+              0
+            ] | max) | round(2)
+          }}
+        {% else %}
+          unavailable
+        {% endif %}
+      forecast_ok: >-
+        {% if simulated_admission_guards %}
+          true
+        {% else %}
+          {{
+            is_number(forecast_raw)
+            and is_number(house_raw)
+            and is_number(recharge_energy)
+            and (
+              (forecast_raw | float)
+              - (house_raw | float)
+              - (recharge_energy | float)
+            ) >= (margin | float)
+          }}
+        {% endif %}
+      runway_ok: >-
+        {% if simulated_admission_guards %}
+          true
+        {% elif protection_time_raw not in ['unknown', 'unavailable', 'none', '']
+              and is_number(runway_raw) %}
+          {% set deadline = today_at(protection_time_raw) %}
+          {{
+            as_timestamp(now())
+            <= as_timestamp(deadline) - ((runway_raw | float) * 60)
+          }}
+        {% else %}
+          false
+        {% endif %}
+      grid_or_export_conflict: >-
+        {{
+          states('sensor.hems_powerwall_grid_charge_plan') in [
+            'CHARGE_CHEAPEST_VISIBLE', 'CHARGE_LATEST_SAFE_START'
+          ]
+          or is_state(
+            'input_boolean.hems_powerwall_export_session_active', 'on'
+          )
+          or is_state(
+            'input_boolean.hems_powerwall_export_simulated_session_active', 'on'
+          )
+        }}
+      manual_conflict: >-
+        {{
+          is_state('input_boolean.hems_solar_manual_override', 'on')
+          or is_state('input_boolean.hems_powerwall_manual_override', 'on')
+          or is_state(
+            'input_boolean.hems_solar_automatic_control_enabled', 'off'
+          )
+        }}
+      end_of_day_protection_active: >-
+        {{
+          protection_time_raw not in ['unknown', 'unavailable', 'none', '']
+          and as_timestamp(now())
+            >= as_timestamp(today_at(protection_time_raw))
+        }}
+      effective_discharge_floor: >-
+        {% if is_number(cycle_floor_raw) %}
+          {{
+            [cycle_floor_raw | float, end_of_day_target_raw | float] | max
+            if end_of_day_protection_active
+              and is_number(end_of_day_target_raw)
+            else cycle_floor_raw | float
+          }}
+        {% else %}
+          unavailable
+        {% endif %}
+      critical_inputs_valid: >-
+        {{
+          storm_state in ['on', 'off']
+          and is_number(price_raw)
+          and is_number(threshold_raw)
+          and is_number(high_value_raw)
+          and is_number(soc_raw)
+          and is_number(cycle_floor_raw)
+          and is_number(end_of_day_target_raw)
+          and is_number(rearm_raw)
+          and (cycle_floor_raw | float) < (rearm_raw | float)
+          and (end_of_day_target_raw | float) <= (rearm_raw | float)
+          and protection_time_raw not in [
+            'unknown', 'unavailable', 'none', ''
+          ]
+          and is_number(runway_raw)
+          and is_number(forecast_raw)
+          and is_number(house_raw)
+        }}
+      high_value_override: >-
+        {{
+          is_number(price_raw)
+          and is_number(high_value_raw)
+          and (price_raw | float) >= (high_value_raw | float)
+        }}
+      safety_exit: >-
+        {{
+          not planning_enabled
+          or ev_curtailment_block
+          or not ev_return_guard_pass
+          or storm_state == 'on'
+          or manual_conflict
+          or grid_or_export_conflict
+          or solar_finished
+          or high_value_override
+          or not critical_inputs_valid
+        }}
+      low_value_price: >-
+        {{
+          is_number(price_raw)
+          and is_number(threshold_raw)
+          and (price_raw | float) <= (threshold_raw | float)
+        }}
+      admission_ready: >-
+        {{
+          not safety_exit
+          and low_value_price
+          and runway_ok
+          and forecast_ok
+          and (soc_raw | float) + 0.5 >= (cycle_floor_raw | float)
+        }}
+    action:
+      - choose:
+          - conditions: "{{ safety_exit }}"
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.hems_solar_powerwall_soc_cycle_phase
+                data:
+                  option: >-
+                    {{ 'IDLE' if not planning_enabled else 'SAFETY_EXIT' }}
+
+          - conditions: "{{ phase == 'IDLE' and admission_ready }}"
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.hems_solar_powerwall_soc_cycle_phase
+                data:
+                  option: >-
+                    {{
+                      'RECOVERY'
+                      if (soc_raw | float)
+                        <= (effective_discharge_floor | float) + 0.5
+                      else 'DISCHARGE'
+                    }}
+
+          - conditions: >-
+              {{
+                phase == 'DISCHARGE'
+                and (soc_raw | float)
+                  <= (effective_discharge_floor | float) + 0.5
+              }}
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.hems_solar_powerwall_soc_cycle_phase
+                data:
+                  option: RECOVERY
+
+          - conditions: >-
+              {{
+                phase == 'RECOVERY'
+                and (soc_raw | float) >= (rearm_raw | float) - 0.5
+                and admission_ready
+              }}
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.hems_solar_powerwall_soc_cycle_phase
+                data:
+                  option: DISCHARGE
+
+          - conditions: "{{ phase == 'SAFETY_EXIT' and not safety_exit }}"
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.hems_solar_powerwall_soc_cycle_phase
+                data:
+                  option: IDLE

@@ -1,0 +1,415 @@
+alias: HEMS - Native Excess Supervisor
+description: >-
+  Owns every real SolarEdge native-excess session that is not owned by the EV
+  Worker, including Solar Only and post-target native sessions. SolarEdge's
+  charging flag is not treated as proof because it can remain stale; actual EV
+  transfer must be confirmed by BYD charging or measured charger power. The
+  supervisor requests a 100% Powerwall hold, tolerates a short solar deficit,
+  stops the EV before releasing the hold after a sustained deficit, and only
+  restores the hold after sustained genuine surplus and a full Powerwall return.
+triggers:
+  - trigger: state
+    entity_id:
+      - input_boolean.hems_native_excess_supervisor_enabled
+      - input_select.hems_native_excess_supervisor_state
+      - input_select.hems_ev_post_target_solar_choice
+      - sensor.hems_effective_ev_soc
+      - sensor.hems_ev_target_today
+      - sensor.hems_effective_powerwall
+      - input_boolean.hems_ev_worker_session_active
+      - input_boolean.hems_ev_manual_override
+      - input_boolean.hems_powerwall_manual_override
+      - input_boolean.hems_test_mode
+      - input_boolean.hems_test_ev_away
+      - input_boolean.hems_test_ev_home_plugged_low_soc
+      - input_boolean.hems_test_powerwall_low
+      - binary_sensor.solaredge_ev_charger_ev_charger_connected
+      - binary_sensor.solaredge_ev_charger_ev_charger_charging
+      - binary_sensor.atto_3_charging
+      - binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled
+      - sensor.solaredge_ev_charger_ev_excess_solar_status
+      - sensor.solaredge_ev_charger_ev_charger_power
+      - binary_sensor.hems_native_excess_deficit
+      - binary_sensor.hems_native_excess_recovery_ready
+    id: state_change
+
+  - trigger: template
+    value_template: >-
+      {{
+        is_state('binary_sensor.hems_native_excess_deficit', 'on')
+        and states('input_select.hems_native_excess_supervisor_state')
+          in ['native_excess_hold', 'native_deficit_confirming']
+      }}
+    for:
+      minutes: >-
+        {{ states('input_number.hems_native_excess_deficit_minutes') | int(30) }}
+    id: sustained_deficit
+
+  - trigger: template
+    value_template: >-
+      {{
+        is_state('binary_sensor.hems_native_excess_recovery_ready', 'on')
+        and states('input_select.hems_native_excess_supervisor_state')
+          in ['house_priority_released', 'surplus_recovery_confirming']
+      }}
+    for:
+      minutes: >-
+        {{ states('input_number.hems_native_excess_recovery_minutes') | int(30) }}
+    id: sustained_recovery
+
+  - trigger: time_pattern
+    minutes: "/5"
+    id: periodic
+
+conditions: []
+
+actions:
+  - variables:
+      state: >-
+        {{ states('input_select.hems_native_excess_supervisor_state') }}
+      post_target_choice: >-
+        {{ states('input_select.hems_ev_post_target_solar_choice') }}
+      enabled: >-
+        {{ is_state('input_boolean.hems_native_excess_supervisor_enabled', 'on') }}
+      connected: >-
+        {{ is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+        ) }}
+      charging: >-
+        {{
+          is_state('binary_sensor.atto_3_charging', 'on')
+          or states(
+            'sensor.solaredge_ev_charger_ev_charger_power'
+          ) | float(0) > 0.5
+        }}
+      native_enabled: >-
+        {{
+          is_state(
+            'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+          )
+          and states(
+            'sensor.solaredge_ev_charger_ev_excess_solar_status'
+          ) | lower == 'enabled'
+        }}
+      powerwall_input_valid: >-
+        {{ is_number(states('sensor.hems_effective_powerwall')) }}
+      ev_inputs_valid: >-
+        {{
+          is_number(states('sensor.hems_effective_ev_soc'))
+          and is_number(states('sensor.hems_ev_target_today'))
+        }}
+      no_test_mode: >-
+        {{
+          is_state('input_boolean.hems_test_mode', 'off')
+          and is_state('input_boolean.hems_test_ev_away', 'off')
+          and is_state(
+            'input_boolean.hems_test_ev_home_plugged_low_soc', 'off'
+          )
+          and is_state('input_boolean.hems_test_powerwall_low', 'off')
+        }}
+      no_manual_override: >-
+        {{
+          is_state('input_boolean.hems_ev_manual_override', 'off')
+          and is_state('input_boolean.hems_powerwall_manual_override', 'off')
+        }}
+      target_met: >-
+        {{
+          ev_inputs_valid
+          and states('sensor.hems_effective_ev_soc') | float
+            >= states('sensor.hems_ev_target_today') | float
+        }}
+      ev_full: >-
+        {{
+          is_number(states('sensor.hems_effective_ev_soc'))
+          and states('sensor.hems_effective_ev_soc') | float >= 99.5
+        }}
+      worker_released: >-
+        {{ is_state('input_boolean.hems_ev_worker_session_active', 'off') }}
+      observed_unowned_session: >-
+        {{
+          enabled and connected and native_enabled and charging
+          and powerwall_input_valid and no_test_mode and no_manual_override
+          and not ev_full and worker_released
+        }}
+      authorised_post_target_session: >-
+        {{
+          enabled and connected and native_enabled and ev_inputs_valid
+          and powerwall_input_valid and no_test_mode and no_manual_override
+          and target_met and not ev_full and worker_released
+          and post_target_choice == 'native_excess_only'
+        }}
+      eligible: >-
+        {{ observed_unowned_session or authorised_post_target_session }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                not enabled
+                or not connected
+                or ev_full
+                or not native_enabled
+                or not no_test_mode
+                or not no_manual_override
+                or not worker_released
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: idle
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sustained_deficit' }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ charging }}"
+                sequence:
+                  - action: button.press
+                    target:
+                      entity_id: >-
+                        button.solaredge_ev_charger_ev_charger_stop_charging
+
+          - wait_template: >-
+              {{
+                not is_state('binary_sensor.atto_3_charging', 'on')
+                and states(
+                  'sensor.solaredge_ev_charger_ev_charger_power'
+                ) | float(99) <= 0.2
+              }}
+            timeout: "00:07:00"
+            continue_on_timeout: true
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        not is_state('binary_sensor.atto_3_charging', 'on')
+                        and states(
+                          'sensor.solaredge_ev_charger_ev_charger_power'
+                        ) | float(99) <= 0.2
+                      }}
+                sequence:
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_native_excess_supervisor_state
+                    data:
+                      option: house_priority_released
+
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS native excess paused
+                      message: >-
+                        SolarEdge native excess remained in energy deficit for
+                        the configured confirmation period. The EV was stopped
+                        before the 100% Powerwall hold was released for house
+                        priority. HEMS will watch for a full Powerwall and
+                        sustained genuine surplus.
+                      data:
+                        tag: hems_native_excess_supervisor
+                        ttl: 3600
+
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS native excess paused
+                      message: >-
+                        Native excess remained in deficit, so HEMS stopped the
+                        EV before releasing the Powerwall hold for house
+                        priority. It will watch for sustained genuine surplus.
+                      data:
+                        tag: hems_native_excess_supervisor
+                        ttl: 3600
+            default:
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.hems_native_excess_supervisor_state
+                data:
+                  option: stop_ack_timeout
+
+              - action: notify.mobile_app_primary_phone
+                continue_on_error: true
+                data:
+                  title: HEMS could not confirm EV stop
+                  message: >-
+                    One EV stop command was sent but SolarEdge did not confirm
+                    zero charging power within seven minutes. The Powerwall
+                    remains held at 100%; no release command was issued.
+                  data:
+                    tag: hems_native_excess_supervisor
+                    ttl: 3600
+
+              - action: notify.mobile_app_secondary_ev_phone
+                continue_on_error: true
+                data:
+                  title: HEMS could not confirm EV stop
+                  message: >-
+                    HEMS sent one EV stop command but BYD/measured power did
+                    not confirm the stop within seven minutes. The Powerwall
+                    hold remains in place.
+                  data:
+                    tag: hems_native_excess_supervisor
+                    ttl: 3600
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                state in [
+                  'house_priority_released', 'surplus_recovery_confirming'
+                ] and charging
+              }}
+        sequence:
+          - action: button.press
+            target:
+              entity_id: button.solaredge_ev_charger_ev_charger_stop_charging
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sustained_recovery' }}"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: native_excess_resumed
+
+          - wait_template: >-
+              {{
+                states('sensor.hems_coordinated_powerwall_mode') == 'backup'
+                and states(
+                  'sensor.hems_coordinated_powerwall_reserve'
+                ) | float(0) >= 100
+                and states(
+                  'select.house_home_energy_gateway_teslemetry_operation_mode'
+                ) == 'backup'
+                and states(
+                  'number.house_home_energy_gateway_teslemetry_backup_reserve'
+                ) | float(0) >= 99.5
+              }}
+            timeout: "00:05:00"
+            continue_on_timeout: true
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        states(
+                          'select.house_home_energy_gateway_teslemetry_operation_mode'
+                        ) == 'backup'
+                        and states(
+                          'number.house_home_energy_gateway_teslemetry_backup_reserve'
+                        ) | float(0) >= 99.5
+                      }}
+                sequence:
+                  - action: input_select.select_option
+                    target:
+                      entity_id: input_select.hems_native_excess_supervisor_state
+                    data:
+                      option: native_excess_hold
+
+                  - action: notify.mobile_app_primary_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS native excess ready again
+                      message: >-
+                        The Powerwall is full and genuine surplus remained
+                        available for the configured recovery period. The 100%
+                        Powerwall hold is restored; SolarEdge may resume native
+                        excess charging naturally.
+                      data:
+                        tag: hems_native_excess_supervisor
+                        ttl: 3600
+
+                  - action: notify.mobile_app_secondary_ev_phone
+                    continue_on_error: true
+                    data:
+                      title: HEMS native excess ready again
+                      message: >-
+                        The Powerwall is full and genuine surplus remained
+                        available. The 100% hold is restored and native excess
+                        charging may resume naturally.
+                      data:
+                        tag: hems_native_excess_supervisor
+                        ttl: 3600
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                state == 'house_priority_released'
+                and is_state(
+                  'binary_sensor.hems_native_excess_recovery_ready', 'on'
+                )
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: surplus_recovery_confirming
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                state == 'surplus_recovery_confirming'
+                and is_state(
+                  'binary_sensor.hems_native_excess_recovery_ready', 'off'
+                )
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: house_priority_released
+
+      - conditions:
+          - condition: template
+            value_template: "{{ state == 'idle' and eligible }}"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: native_excess_hold
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                state == 'native_excess_hold'
+                and is_state('binary_sensor.hems_native_excess_deficit', 'on')
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: native_deficit_confirming
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                state == 'native_deficit_confirming'
+                and is_state('binary_sensor.hems_native_excess_deficit', 'off')
+              }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.hems_native_excess_supervisor_state
+            data:
+              option: native_excess_hold
+
+mode: single
+max_exceeded: silent

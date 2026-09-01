@@ -1,8 +1,8 @@
 alias: HEMS - Charging Deadline Warning
 description: >-
   Sends one warning when the read-only charging feasibility sensor enters a
-  target-risk or incomplete EV-return-plan state. primary user receives every warning;
-  secondary EV user receives it only when an active EV shortfall or EV return decision is
+  target-risk or incomplete EV-return-plan state. The primary user receives every warning;
+  the secondary EV user receives it only when an active EV shortfall or EV return decision is
   involved. A passed-deadline warning is evaluated only during the first 15
   minutes after the configured charging target time and requires at least 1.0
   kWh of active remaining shortfall. Later normal Powerwall discharge cannot
@@ -113,11 +113,11 @@ actions:
       active_shortfall_kwh: >-
         {% set pw_raw = states('sensor.powerwall_energy_required') %}
         {% set ev_raw = states('sensor.ev_energy_required') %}
-        {% set availability = states('sensor.ev_charging_availability') %}
-        {% set ev_active = (
-          availability in ['READY', 'CHARGING']
-          or is_state('input_boolean.ev_expected_back_today', 'on')
-        ) %}
+        {% set context = states('sensor.hems_ev_charging_context') %}
+        {% set external = context == 'EXTERNAL_CHARGING' %}
+        {% set ev_active = not external and (
+          context in ['HOME_CONNECTED', 'HOME_CHARGING']
+          or is_state('input_boolean.ev_expected_back_today', 'on')) %}
         {% set pw_required = pw_raw | float(0)
           if is_number(pw_raw) else 0 %}
         {% set ev_required = ev_raw | float(0)
@@ -330,15 +330,17 @@ actions:
           'WARNING_EV_RETURN_AFTER_DEADLINE',
           'WARNING_EV_RETURN_WINDOW_TOO_SHORT'
         ] %}
-        {% set availability = states('sensor.ev_charging_availability') %}
+        {% set context = states('sensor.hems_ev_charging_context') %}
+        {% set external = context == 'EXTERNAL_CHARGING' %}
         {% set soc_raw = states('sensor.hems_effective_ev_soc') %}
         {% set target_raw = states('sensor.hems_ev_target_today') %}
         {% set active_ev_shortfall = (
-          is_number(soc_raw)
+          not external
+          and is_number(soc_raw)
           and is_number(target_raw)
           and (soc_raw | float) < (target_raw | float)
           and (
-            availability in ['READY', 'CHARGING']
+            context in ['HOME_CONNECTED', 'HOME_CHARGING']
             or is_state('input_boolean.ev_expected_back_today', 'on')
           )
         ) %}

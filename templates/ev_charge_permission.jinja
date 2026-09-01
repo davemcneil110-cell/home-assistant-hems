@@ -1,4 +1,5 @@
 {% set availability = states('sensor.ev_charging_availability') %}
+{% set charging_context = states('sensor.hems_ev_charging_context') %}
 {% set soc_raw = states('sensor.hems_effective_ev_soc') %}
 {% set target_raw = states('sensor.hems_ev_target_today') %}
 {% set genuine_solar = states('sensor.hems_genuine_excess_solar') %}
@@ -7,13 +8,36 @@
 {% set effective_limit_raw = states(
   'sensor.hems_effective_grid_charge_price_limit'
 ) %}
-{% set urgent_active = is_state('input_boolean.hems_ev_urgent_charge_active', 'on') %}
-{% set recovery_approved = is_state('input_boolean.hems_ev_recovery_approved', 'on') %}
+{% set plan_raw = states('input_select.hems_ev_connection_charge_plan') %}
+{% set valid_plans = [
+  'Unanswered',
+  'Cheap Grid',
+  'Solar Only',
+  'Charge Now'
+] %}
+{% set urgent_active = is_state(
+  'input_boolean.hems_ev_urgent_charge_active',
+  'on'
+) %}
+{% set recovery_approved = is_state(
+  'input_boolean.hems_ev_recovery_approved',
+  'on'
+) %}
+{% set worker_session_active = is_state(
+  'input_boolean.hems_ev_worker_session_active',
+  'on'
+) %}
+{% set worker_session_type = states(
+  'input_select.hems_ev_worker_session_type'
+) %}
 
 {% if availability == 'TEST_CONFLICT' %}
   TEST_CONFLICT
+{% elif charging_context == 'EXTERNAL_CHARGING' %}
+  EV_UNAVAILABLE
 {% elif not is_number(soc_raw)
-      or not is_number(target_raw) %}
+      or not is_number(target_raw)
+      or plan_raw not in valid_plans %}
   INPUT_UNAVAILABLE
 {% else %}
   {% set soc = soc_raw | float %}
@@ -23,37 +47,68 @@
       and is_number(effective_limit_raw) %}
   {% set current_grid_cheap = price_inputs_valid
       and (current_price_raw | float) <= (effective_limit_raw | float) %}
-  {# Before the deadline retain the Amber forecast scheduler. After the
-     deadline, permit target catch-up only while the live price is still within
-     the effective normal/cloudy-day limit. This prevents a 14:30 deadline from
-     blocking a genuinely cheap catch-up interval, but forces Stop as soon as
-     the price rises above the configured allowance. #}
   {% set grid_charge_now = current_grid_cheap and (
       grid_window in [
         'CHARGE_NOW_CHEAPEST_VISIBLE',
-        'CHARGE_NOW_REQUIRED_CHEAP_WINDOW'
+        'CHARGE_NOW_REQUIRED_CHEAP_WINDOW',
+        'CHARGE_NOW_LATEST_SAFE_START'
       ]
       or grid_window == 'DEADLINE_PASSED'
     ) %}
+  {% set cheap_grid_session_latched = worker_session_active
+      and worker_session_type == 'cheap_grid'
+      and current_grid_cheap %}
 
-  {% if soc >= target %}
-    EV_TARGET_MET
-  {% elif availability not in ['READY', 'CHARGING'] %}
+  {# Safety and urgent recovery stay above every optional connection plan.
+     An EV at or below 30% must therefore recover to 50% automatically. #}
+  {% if availability not in ['READY', 'CHARGING'] %}
     EV_UNAVAILABLE
   {% elif urgent_active and soc < 50 %}
     EV_URGENT_CONTINUE_TO_50
   {% elif soc <= 30 %}
     EV_URGENT_START_TO_50
-  {% elif recovery_approved and soc < target %}
+
+  {# Solar Only deliberately ignores the normal daily SOC target. It blocks
+     grid charging and remains open to genuine/native excess solar until the
+     vehicle reaches its physical 100% limit or is unplugged. #}
+  {% elif plan_raw == 'Solar Only' %}
+    {% if soc >= 100 %}
+      EV_TARGET_MET
+    {% elif solar_available %}
+      ALLOW_EXCESS_SOLAR
+    {% else %}
+      BLOCK_WAIT_FOR_EXCESS_SOLAR_ONLY
+    {% endif %}
+
+  {# Normal target enforcement applies only to the grid-capable plans. #}
+  {% elif soc >= target %}
+    EV_TARGET_MET
+  {% elif recovery_approved %}
     EV_APPROVED_CHARGE_NOW
+
+  {# Until a decision is made, genuine excess solar remains safe to use but
+     HEMS cannot begin a grid session. #}
+  {% elif plan_raw == 'Unanswered' %}
+    {% if solar_available %}
+      ALLOW_EXCESS_SOLAR
+    {% else %}
+      EV_CONNECTION_PLAN_REQUIRED
+    {% endif %}
+
+  {# Charge Now is actionable only while its separate approval helper is on.
+     If that approval has ended, never silently fall back to grid charging. #}
+  {% elif plan_raw == 'Charge Now' %}
+    BLOCK_CHARGE_NOW_APPROVAL_INACTIVE
+
+  {# Cheap Grid uses the forecast to choose when a new session starts. Once
+     the guarded Worker owns a cheap-grid session, the session stays latched
+     while the live Amber price remains inside the approved effective limit.
+     This prevents harmless five-minute forecast changes from stopping and
+     restarting a session that is already economical. #}
+  {% elif cheap_grid_session_latched %}
+    ALLOW_CHEAP_GRID
   {% elif grid_window in ['INPUT_UNAVAILABLE', 'TEST_CONFLICT'] %}
     INPUT_UNAVAILABLE
-  {% elif soc < 50 and grid_charge_now %}
-    ALLOW_CHEAP_GRID
-  {% elif soc < 50 and solar_available %}
-    ALLOW_EXCESS_SOLAR
-  {% elif soc < 50 %}
-    EV_RECOVERY_APPROVAL_REQUIRED
   {% elif grid_charge_now %}
     ALLOW_CHEAP_GRID
   {% elif solar_available %}

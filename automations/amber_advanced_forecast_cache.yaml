@@ -22,7 +22,8 @@ conditions: []
 actions:
   - action: amberelectric.get_forecasts
     data:
-      config_entry_id: 01KW40NV0005JKQEP4P7BYEJSZ
+      # Replace with the target installation's Amber Electric config-entry ID.
+      config_entry_id: YOUR_AMBER_CONFIG_ENTRY_ID
       channel_type: general
     response_variable: amber_response
 

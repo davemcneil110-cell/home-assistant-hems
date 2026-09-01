@@ -1,0 +1,867 @@
+input_boolean:
+  hems_native_excess_supervisor_enabled:
+    name: HEMS Native Excess Supervisor Enabled
+    icon: mdi:solar-power-variant
+
+  hems_ev_post_target_solar_defaults_initialized:
+    name: HEMS EV Post-Target Solar Defaults Initialised
+    icon: mdi:cog-check-outline
+
+  hems_optimal_energy_defaults_initialized:
+    name: HEMS Optimal Energy Defaults Initialized
+    icon: mdi:cog-check-outline
+
+input_number:
+  hems_ev_post_target_solar_forecast_threshold:
+    name: HEMS EV Post-Target Solar Forecast Threshold
+    icon: mdi:weather-sunny-alert
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: kWh
+    mode: box
+
+  hems_powerwall_charge_efficiency:
+    name: HEMS Powerwall Charge Efficiency
+    icon: mdi:battery-sync
+    min: 70
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+
+  hems_powerwall_charge_safety_buffer:
+    name: HEMS Powerwall Charge Safety Buffer
+    icon: mdi:clock-alert-outline
+    min: 0
+    max: 120
+    step: 5
+    unit_of_measurement: min
+    mode: box
+
+  hems_powerwall_cheapest_price_tolerance:
+    name: HEMS Powerwall Cheapest Price Tolerance
+    icon: mdi:cash-sync
+    min: 0
+    max: 0.05
+    step: 0.001
+    unit_of_measurement: AUD/kWh
+    mode: box
+
+  hems_native_excess_deficit_minutes:
+    name: HEMS Native Excess Deficit Minutes
+    icon: mdi:timer-alert-outline
+    min: 5
+    max: 60
+    step: 5
+    unit_of_measurement: min
+    mode: box
+
+  hems_native_excess_recovery_minutes:
+    name: HEMS Native Excess Recovery Minutes
+    icon: mdi:timer-check-outline
+    min: 5
+    max: 60
+    step: 5
+    unit_of_measurement: min
+    mode: box
+
+  hems_native_excess_grid_import_threshold:
+    name: HEMS Native Excess Grid Import Threshold
+    icon: mdi:transmission-tower-import
+    min: 0.1
+    max: 3
+    step: 0.1
+    unit_of_measurement: kW
+    mode: box
+
+  hems_native_excess_battery_discharge_threshold:
+    name: HEMS Native Excess Battery Discharge Threshold
+    icon: mdi:battery-arrow-down-outline
+    min: 0.1
+    max: 3
+    step: 0.1
+    unit_of_measurement: kW
+    mode: box
+
+input_select:
+  hems_ev_post_target_solar_choice:
+    name: HEMS EV Post-Target Solar Choice
+    icon: mdi:car-electric-outline
+    options:
+      - none
+      - native_excess_only
+    initial: none
+
+  hems_native_excess_supervisor_state:
+    name: HEMS Native Excess Supervisor State
+    icon: mdi:state-machine
+    options:
+      - idle
+      - native_excess_hold
+      - native_deficit_confirming
+      - house_priority_released
+      - surplus_recovery_confirming
+      - native_excess_resumed
+      - stop_ack_timeout
+    initial: idle
+
+template:
+  - sensor:
+      - name: HEMS Powerwall Required Charge Minutes
+        unique_id: hems_powerwall_required_charge_minutes_v1
+        unit_of_measurement: min
+        icon: mdi:battery-clock-outline
+        availability: >-
+          {{
+            is_number(states('sensor.powerwall_energy_required'))
+            and is_number(states(
+              'input_number.hems_powerwall_planning_charge_power'
+            ))
+            and is_number(states(
+              'input_number.hems_powerwall_charge_efficiency'
+            ))
+            and is_number(states(
+              'input_number.hems_powerwall_charge_safety_buffer'
+            ))
+            and states(
+              'input_number.hems_powerwall_planning_charge_power'
+            ) | float(0) > 0
+            and states(
+              'input_number.hems_powerwall_charge_efficiency'
+            ) | float(0) > 0
+          }}
+        state: >-
+          {% set energy = [
+            states('sensor.powerwall_energy_required') | float(0), 0
+          ] | max %}
+          {% set power = states(
+            'input_number.hems_powerwall_planning_charge_power'
+          ) | float %}
+          {% set efficiency = states(
+            'input_number.hems_powerwall_charge_efficiency'
+          ) | float / 100 %}
+          {% set buffer = states(
+            'input_number.hems_powerwall_charge_safety_buffer'
+          ) | float %}
+          {{ ((energy / (power * efficiency) * 60) + buffer) | round(0) }}
+
+      - name: HEMS Powerwall Latest Safe Grid Start
+        unique_id: hems_powerwall_latest_safe_grid_start_v1
+        device_class: timestamp
+        icon: mdi:clock-start
+        availability: >-
+          {{
+            is_number(states('sensor.hems_powerwall_required_charge_minutes'))
+            and states('input_datetime.hems_charging_target_time')
+              not in ['unknown', 'unavailable', 'none', '']
+          }}
+        state: >-
+          {% set deadline = today_at(
+            states('input_datetime.hems_charging_target_time')
+          ) %}
+          {% set minutes = states(
+            'sensor.hems_powerwall_required_charge_minutes'
+          ) | float(0) %}
+          {{ (as_timestamp(deadline) - (minutes * 60)) | timestamp_local }}
+
+      - name: HEMS Powerwall Grid Charge Plan
+        unique_id: hems_powerwall_grid_charge_plan_v1
+        icon: mdi:transmission-tower-export
+        state: >-
+          {% set soc_raw = states('sensor.hems_effective_powerwall') %}
+          {% set target_raw = states('input_number.powerwall_target') %}
+          {% set required_raw = states('sensor.powerwall_energy_required') %}
+          {% set grid_required_raw = states(
+            'sensor.hems_effective_grid_energy_required'
+          ) %}
+          {% set shortfall_state = states(
+            'binary_sensor.hems_material_daily_grid_shortfall'
+          ) %}
+          {% set price_raw = states('sensor.hems_effective_import_price') %}
+          {% set limit_raw = states(
+            'sensor.hems_effective_grid_charge_price_limit'
+          ) %}
+          {% set cheapest_raw = states(
+            'sensor.hems_cheapest_visible_import_price'
+          ) %}
+          {% set tolerance_raw = states(
+            'input_number.hems_powerwall_cheapest_price_tolerance'
+          ) %}
+          {% set latest = as_datetime(states(
+            'sensor.hems_powerwall_latest_safe_grid_start'
+          ), none) %}
+          {% set target_time = states(
+            'input_datetime.hems_charging_target_time'
+          ) %}
+          {% set deadline = today_at(target_time)
+            if target_time not in ['unknown', 'unavailable', 'none', '']
+            else none %}
+          {% set cache_status = states(
+            'input_text.hems_advanced_forecast_status'
+          ) %}
+          {% set cache_updated = as_datetime(states(
+            'input_datetime.hems_advanced_forecast_last_updated'
+          ), none) %}
+          {% set cache_fresh = cache_updated is not none
+            and (as_timestamp(now()) - as_timestamp(cache_updated)) >= 0
+            and (as_timestamp(now()) - as_timestamp(cache_updated)) <= 900 %}
+          {# Daily energy counters and Amber forecast helpers roll over at
+             slightly different times.  During that short settling period the
+             previous day's shortfall must not be treated as permission to
+             grid-charge.  Explicit export/refill sessions bypass this guard;
+             EV interlocks remain authoritative downstream. #}
+          {% set minutes_after_midnight = now().hour * 60 + now().minute %}
+          {% set explicit_export_session =
+            is_state(
+              'input_boolean.hems_powerwall_export_session_active', 'on'
+            )
+            or is_state(
+              'input_boolean.hems_powerwall_export_simulated_session_active',
+              'on'
+            ) %}
+          {% set midnight_rollover_guard =
+            minutes_after_midnight < 15
+            and not explicit_export_session %}
+          {% set inputs_valid =
+            is_number(soc_raw)
+            and is_number(target_raw)
+            and is_number(required_raw)
+            and is_number(grid_required_raw)
+            and shortfall_state in ['on', 'off']
+            and is_number(price_raw)
+            and is_number(limit_raw)
+            and is_number(tolerance_raw)
+            and latest is not none
+            and deadline is not none %}
+          {% if midnight_rollover_guard %}
+            MIDNIGHT_ROLLOVER_GUARD
+          {% elif not inputs_valid %}
+            INPUT_UNAVAILABLE
+          {% else %}
+            {% set soc = soc_raw | float %}
+            {% set target = target_raw | float %}
+            {% set required = required_raw | float %}
+            {% set grid_required = grid_required_raw | float %}
+            {% set price = price_raw | float %}
+            {% set limit = limit_raw | float %}
+            {% set tolerance = tolerance_raw | float %}
+            {% set at_or_after_latest = now() >= latest %}
+            {% set before_deadline = now() < deadline %}
+            {% set forecast_valid = cache_status in [
+              'VALID_ADVANCED', 'VALID_WITH_PER_KWH_FALLBACK'
+            ] and cache_fresh and is_number(cheapest_raw) %}
+            {% set at_cheapest = forecast_valid
+              and price <= ((cheapest_raw | float) + tolerance) %}
+            {% if soc >= target or required <= 0.1 %}
+              TARGET_MET
+            {% elif shortfall_state == 'off' %}
+              NO_DAILY_SHORTFALL
+            {% elif not before_deadline %}
+              DEADLINE_PASSED_WITH_SHORTFALL
+            {% elif at_or_after_latest and price <= limit %}
+              CHARGE_LATEST_SAFE_START
+            {% elif at_or_after_latest and price > limit %}
+              TARGET_AT_RISK_PRICE_TOO_HIGH
+            {% elif at_cheapest and price <= limit %}
+              CHARGE_CHEAPEST_VISIBLE
+            {% elif forecast_valid %}
+              HOLD_FOR_CHEAPER_GRID
+            {% else %}
+              HOLD_FORECAST_UNAVAILABLE
+            {% endif %}
+          {% endif %}
+        attributes:
+          current_price: >-
+            {{ states('sensor.hems_effective_import_price') }}
+          cheapest_visible_price: >-
+            {{ states('sensor.hems_cheapest_visible_import_price') }}
+          price_limit: >-
+            {{ states('sensor.hems_effective_grid_charge_price_limit') }}
+          raw_grid_energy_required: >-
+            {{ states('sensor.hems_effective_grid_energy_required') }}
+          material_shortfall_active: >-
+            {{ states('binary_sensor.hems_material_daily_grid_shortfall') }}
+          shortfall_enter_threshold: 1.5
+          shortfall_exit_threshold: 0.5
+          shortfall_stability_minutes: 10
+          required_charge_minutes: >-
+            {{ states('sensor.hems_powerwall_required_charge_minutes') }}
+          latest_safe_start: >-
+            {{ states('sensor.hems_powerwall_latest_safe_grid_start') }}
+          midnight_rollover_guard_active: >-
+            {% set explicit_export_session =
+              is_state(
+                'input_boolean.hems_powerwall_export_session_active', 'on'
+              )
+              or is_state(
+                'input_boolean.hems_powerwall_export_simulated_session_active',
+                'on'
+              ) %}
+            {{ (now().hour * 60 + now().minute) < 15
+              and not explicit_export_session }}
+          midnight_rollover_guard_until: "00:15:00"
+          explicit_export_session_active: >-
+            {{
+              is_state(
+                'input_boolean.hems_powerwall_export_session_active', 'on'
+              )
+              or is_state(
+                'input_boolean.hems_powerwall_export_simulated_session_active',
+                'on'
+              )
+            }}
+
+      - name: HEMS Powerwall Brain Reserve
+        unique_id: hems_powerwall_brain_reserve_v1
+        unit_of_measurement: "%"
+        icon: mdi:battery-lock
+        availability: >-
+          {{
+            is_number(states('sensor.hems_effective_powerwall'))
+            and is_number(states('input_number.powerwall_target'))
+            and is_number(states('input_number.minimum_power_reserve'))
+          }}
+        state: >-
+          {% set plan = states('sensor.hems_powerwall_grid_charge_plan') %}
+          {% set soc = states('sensor.hems_effective_powerwall') | float %}
+          {% set target = states('input_number.powerwall_target') | float %}
+          {% set minimum = states('input_number.minimum_power_reserve') | float %}
+          {% if plan == 'MIDNIGHT_ROLLOVER_GUARD' %}
+            {{ [[minimum, 0] | max, 100] | min | round(0) }}
+          {% elif plan in [
+            'CHARGE_CHEAPEST_VISIBLE', 'CHARGE_LATEST_SAFE_START'
+          ] %}
+            {{ [[target, 0] | max, 100] | min | round(0) }}
+          {% elif plan in [
+            'HOLD_FOR_CHEAPER_GRID',
+            'HOLD_FORECAST_UNAVAILABLE',
+            'TARGET_AT_RISK_PRICE_TOO_HIGH'
+          ] %}
+            {{ [[[soc | round(0), minimum] | max, 0] | max, 100]
+              | min | round(0) }}
+          {% else %}
+            {{ [[minimum, 0] | max, 100] | min | round(0) }}
+          {% endif %}
+
+      - name: HEMS Native Excess Supervisor
+        unique_id: hems_native_excess_supervisor_v1
+        icon: mdi:solar-power-variant-outline
+        state: >-
+          {{ states('input_select.hems_native_excess_supervisor_state') }}
+        attributes:
+          enabled: >-
+            {{ is_state(
+              'input_boolean.hems_native_excess_supervisor_enabled', 'on'
+            ) }}
+          ev_soc: "{{ states('sensor.hems_effective_ev_soc') }}"
+          ev_target: "{{ states('sensor.hems_ev_target_today') }}"
+          powerwall_soc: "{{ states('sensor.hems_effective_powerwall') }}"
+          grid_power: "{{ states('sensor.hems_effective_grid_power') }}"
+          battery_power: "{{ states('sensor.hems_effective_battery_power') }}"
+          observed_unowned_session: >-
+            {% set charging = is_state(
+              'binary_sensor.hems_confirmed_ev_charging', 'on'
+            ) %}
+            {% set native_enabled = is_state(
+              'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled',
+              'on'
+            ) and states(
+              'sensor.solaredge_ev_charger_ev_excess_solar_status'
+            ) | lower == 'enabled' %}
+            {{
+              charging
+              and native_enabled
+              and is_state(
+                'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+              )
+              and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+            }}
+          owner: >-
+            {% set supervisor_state = states(
+              'input_select.hems_native_excess_supervisor_state'
+            ) %}
+            {% if is_state('input_boolean.hems_ev_worker_session_active', 'on') %}
+              ev_worker
+            {% elif supervisor_state != 'idle' %}
+              native_supervisor
+            {% else %}
+              none
+            {% endif %}
+
+  - binary_sensor:
+      - name: HEMS Confirmed EV Charging
+        unique_id: hems_confirmed_ev_charging_v1
+        icon: mdi:ev-station
+        availability: >-
+          {{
+            states.binary_sensor.solaredge_ev_charger_ev_charger_charging
+              is not none
+            or is_number(states(
+              'sensor.solaredge_ev_charger_ev_charger_power'
+            ))
+            or states('binary_sensor.atto_3_charging') in ['on', 'off']
+          }}
+        state: >-
+          {% set charger_entity =
+            states.binary_sensor.solaredge_ev_charger_ev_charger_charging %}
+          {% set charger_binary = charger_entity.state
+            if charger_entity is not none else 'unavailable' %}
+          {% set charger_power = states(
+            'sensor.solaredge_ev_charger_ev_charger_power'
+          ) %}
+          {% set charger_status = states(
+            'sensor.solaredge_ev_charger_ev_charger_status'
+          ) | lower %}
+          {% set byd_charging = states('binary_sensor.atto_3_charging') %}
+          {% set byd_power = states('sensor.atto_3_battery_power') %}
+          {% set raw_on_age =
+            as_timestamp(now()) - as_timestamp(charger_entity.last_changed)
+            if charger_entity is not none else 999999 %}
+          {{
+            (charger_binary == 'on'
+              and raw_on_age >= 0 and raw_on_age <= 600)
+            or (is_number(charger_power) and charger_power | float >= 0.5)
+            or charger_status == 'charging'
+            or byd_charging == 'on'
+            or (
+              is_state('binary_sensor.atto_3_plug', 'on')
+              and is_number(byd_power)
+              and (byd_power | float | abs) >= 1000
+            )
+          }}
+        attributes:
+          purpose: >-
+            Fuses fresh SolarEdge state, measured charger power/status and BYD
+            telemetry. A SolarEdge charging binary that has remained on for
+            more than ten minutes without corroboration is treated as stale.
+          solaredge_binary: >-
+            {{ states(
+              'binary_sensor.solaredge_ev_charger_ev_charger_charging'
+            ) }}
+          solaredge_binary_age_seconds: >-
+            {% set entity =
+              states.binary_sensor.solaredge_ev_charger_ev_charger_charging %}
+            {{
+              (as_timestamp(now()) - as_timestamp(entity.last_changed))
+                | round(0)
+              if entity is not none else none
+            }}
+          solaredge_power: >-
+            {{ states('sensor.solaredge_ev_charger_ev_charger_power') }}
+          solaredge_status: >-
+            {{ states('sensor.solaredge_ev_charger_ev_charger_status') }}
+          byd_charging: "{{ states('binary_sensor.atto_3_charging') }}"
+          byd_battery_power: "{{ states('sensor.atto_3_battery_power') }}"
+
+      - name: HEMS Material Daily Grid Shortfall
+        unique_id: hems_material_daily_grid_shortfall_v1
+        icon: mdi:transmission-tower-import
+        availability: >-
+          {{
+            is_number(states('sensor.hems_effective_grid_energy_required'))
+          }}
+        delay_on: "00:10:00"
+        delay_off: "00:10:00"
+        state: >-
+          {% set grid_required = states(
+            'sensor.hems_effective_grid_energy_required'
+          ) | float(0) %}
+          {% if this.state == 'on' %}
+            {{ grid_required > 0.5 }}
+          {% else %}
+            {{ grid_required >= 1.5 }}
+          {% endif %}
+        attributes:
+          raw_grid_energy_required: >-
+            {{ states('sensor.hems_effective_grid_energy_required') }}
+          enter_threshold: 1.5
+          exit_threshold: 0.5
+          stability_minutes: 10
+          purpose: >-
+            Prevents small daily-shortfall forecast changes around 1 kWh from
+            repeatedly switching the Powerwall between Backup and Self
+            Consumption.
+
+      - name: HEMS Native Excess Deficit
+        unique_id: hems_native_excess_deficit_v1
+        icon: mdi:solar-power-variant-outline
+        availability: >-
+          {{
+            is_number(states('sensor.hems_effective_grid_power'))
+            and is_number(states('sensor.hems_effective_battery_power'))
+            and is_number(states(
+              'input_number.hems_native_excess_grid_import_threshold'
+            ))
+            and is_number(states(
+              'input_number.hems_native_excess_battery_discharge_threshold'
+            ))
+          }}
+        state: >-
+          {% set supervisor_state = states(
+            'input_select.hems_native_excess_supervisor_state'
+          ) %}
+          {% set supervised = supervisor_state in [
+            'native_excess_hold',
+            'native_deficit_confirming',
+            'native_excess_resumed',
+            'stop_ack_timeout'
+          ] %}
+          {% set charging = is_state(
+            'binary_sensor.hems_confirmed_ev_charging', 'on'
+          ) %}
+          {% set grid = states('sensor.hems_effective_grid_power') | float %}
+          {% set battery = states(
+            'sensor.hems_effective_battery_power'
+          ) | float %}
+          {% set grid_limit = states(
+            'input_number.hems_native_excess_grid_import_threshold'
+          ) | float %}
+          {% set battery_limit = states(
+            'input_number.hems_native_excess_battery_discharge_threshold'
+          ) | float %}
+          {{
+            supervised
+            and (
+              not charging
+              or grid > grid_limit
+              or battery > battery_limit
+            )
+          }}
+
+      - name: HEMS Native Excess Recovery Ready
+        unique_id: hems_native_excess_recovery_ready_v1
+        icon: mdi:weather-sunny-alert
+        availability: >-
+          {{
+            is_number(states('sensor.hems_effective_powerwall'))
+            and states('sensor.hems_genuine_excess_solar')
+              not in ['unknown', 'unavailable', 'INPUT_UNAVAILABLE', '']
+          }}
+        state: >-
+          {{
+            states('sensor.hems_effective_powerwall') | float(0) >= 99
+            and is_state('sensor.hems_genuine_excess_solar', 'AVAILABLE')
+          }}
+
+automation:
+  - id: hems_optimal_energy_defaults_20260801
+    alias: HEMS - Initialise Optimal Energy Defaults
+    description: >-
+      Applies recommended defaults once. Afterwards Home Assistant restores
+      user-adjusted helper values across restarts. Turn the internal defaults
+      marker off and restart only when an intentional reset is required.
+    triggers:
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_boolean.hems_optimal_energy_defaults_initialized
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_powerwall_charge_efficiency
+        data:
+          value: 90
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_powerwall_charge_safety_buffer
+        data:
+          value: 30
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_powerwall_cheapest_price_tolerance
+        data:
+          value: 0.005
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_native_excess_deficit_minutes
+        data:
+          value: 30
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_native_excess_recovery_minutes
+        data:
+          value: 30
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hems_native_excess_grid_import_threshold
+        data:
+          value: 0.5
+      - action: input_number.set_value
+        target:
+          entity_id: >-
+            input_number.hems_native_excess_battery_discharge_threshold
+        data:
+          value: 0.5
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.hems_optimal_energy_defaults_initialized
+    mode: single
+
+  - id: hems_ev_post_target_solar_defaults_20260802
+    alias: HEMS - Initialise EV Post-Target Solar Defaults
+    description: >-
+      Applies the recommended post-target solar threshold once while preserving
+      later user adjustments across Home Assistant restarts.
+    triggers:
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: >-
+          input_boolean.hems_ev_post_target_solar_defaults_initialized
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: >-
+            input_number.hems_ev_post_target_solar_forecast_threshold
+        data:
+          value: 5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.hems_ev_post_target_solar_choice
+        data:
+          option: none
+      - action: input_boolean.turn_on
+        target:
+          entity_id: >-
+            input_boolean.hems_ev_post_target_solar_defaults_initialized
+    mode: single
+
+  - id: hems_ev_automatic_post_target_native_handoff_20260811
+    alias: HEMS - EV Automatic Post-Target Native Handoff
+    description: >-
+      Once today's fixed target has been reached, automatically authorises
+      SolarEdge native excess charging when HEMS confirms genuine surplus. The
+      notification distinguishes a Worker-owned session from a Solar Only
+      connection so it never falsely claims that the EV Worker released a
+      session. This does not change the EV target, enable Long Drive Today, or
+      authorise grid charging. A one percent SOC tolerance accommodates
+      delayed/rounded BYD telemetry.
+    triggers:
+      - trigger: template
+        id: solar_handoff_ready
+        value_template: >-
+          {% set soc = states('sensor.hems_effective_ev_soc') %}
+          {% set target = states('sensor.hems_ev_target_today') %}
+          {% set connected = is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+          ) or is_state('binary_sensor.atto_3_plug', 'on') %}
+          {% set native_enabled = is_state(
+            'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+          ) or states(
+            'sensor.solaredge_ev_charger_ev_excess_solar_status'
+          ) | lower == 'enabled' %}
+          {{
+            is_state('input_boolean.enable_ev_automation', 'on')
+            and is_state(
+              'input_boolean.hems_native_excess_supervisor_enabled', 'on'
+            )
+            and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+            and is_state('input_boolean.hems_ev_long_drive_today', 'off')
+            and is_state('input_boolean.hems_ev_manual_override', 'off')
+            and is_state(
+              'input_boolean.hems_powerwall_manual_override', 'off'
+            )
+            and is_state('input_boolean.hems_test_mode', 'off')
+            and is_state('input_boolean.hems_test_ev_away', 'off')
+            and is_state(
+              'input_boolean.hems_test_ev_home_plugged_low_soc', 'off'
+            )
+            and is_state('input_boolean.hems_test_powerwall_low', 'off')
+            and connected
+            and native_enabled
+            and is_number(soc)
+            and is_number(target)
+            and (soc | float) >= (target | float - 1)
+            and (soc | float) < 99.5
+            and is_state('sensor.hems_genuine_excess_solar', 'AVAILABLE')
+            and not is_state(
+              'input_select.hems_ev_post_target_solar_choice',
+              'native_excess_only'
+            )
+          }}
+        for: "00:01:00"
+      - trigger: time_pattern
+        minutes: "/5"
+        id: recovery_check
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set soc = states('sensor.hems_effective_ev_soc') %}
+          {% set target = states('sensor.hems_ev_target_today') %}
+          {% set connected = is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+          ) or is_state('binary_sensor.atto_3_plug', 'on') %}
+          {% set native_enabled = is_state(
+            'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+          ) or states(
+            'sensor.solaredge_ev_charger_ev_excess_solar_status'
+          ) | lower == 'enabled' %}
+          {{
+            is_state('input_boolean.enable_ev_automation', 'on')
+            and is_state(
+              'input_boolean.hems_native_excess_supervisor_enabled', 'on'
+            )
+            and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+            and is_state('input_boolean.hems_ev_long_drive_today', 'off')
+            and is_state('input_boolean.hems_ev_manual_override', 'off')
+            and is_state(
+              'input_boolean.hems_powerwall_manual_override', 'off'
+            )
+            and is_state('input_boolean.hems_test_mode', 'off')
+            and is_state('input_boolean.hems_test_ev_away', 'off')
+            and is_state(
+              'input_boolean.hems_test_ev_home_plugged_low_soc', 'off'
+            )
+            and is_state('input_boolean.hems_test_powerwall_low', 'off')
+            and connected
+            and native_enabled
+            and is_number(soc)
+            and is_number(target)
+            and (soc | float) >= (target | float - 1)
+            and (soc | float) < 99.5
+            and is_state('sensor.hems_genuine_excess_solar', 'AVAILABLE')
+            and not is_state(
+              'input_select.hems_ev_post_target_solar_choice',
+              'native_excess_only'
+            )
+          }}
+    actions:
+      - variables:
+          ev_soc: >-
+            {{ states('sensor.hems_effective_ev_soc') | float | round(0) | int }}
+          ev_target: >-
+            {{ states('sensor.hems_ev_target_today') | float | round(0) | int }}
+          powerwall_soc: >-
+            {{ states('sensor.hems_effective_powerwall') | float | round(0) | int }}
+          connection_plan: >-
+            {{ states('input_select.hems_ev_connection_charge_plan') }}
+          handoff_message: >-
+            {% if states('input_select.hems_ev_connection_charge_plan') == 'Solar Only' %}
+              Today's solar-only connection plan reached the
+              {{ states('sensor.hems_ev_target_today') | float | round(0) | int }}%
+              target without a guarded EV Worker session to release. Genuine
+              solar surplus is still available, so SolarEdge native excess
+              control may add opportunistic charge above target.
+            {% else %}
+              The guarded EV Worker completed today's
+              {{ states('sensor.hems_ev_target_today') | float | round(0) | int }}% target
+              and released its Worker-owned session. Genuine solar surplus is
+              now available, so SolarEdge native excess control may add
+              opportunistic charge above target.
+            {% endif %}
+
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.hems_ev_post_target_solar_choice
+        data:
+          option: native_excess_only
+
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.hems_native_excess_supervisor_state
+        data:
+          option: idle
+
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_solar_choice
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_solar_choice
+
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          title: HEMS EV continuing on excess solar
+          message: >-
+            {{ handoff_message }} Today's target remains {{ ev_target }}%; no
+            grid charging or 100% target was authorised. Connection plan:
+            {{ connection_plan }}. EV: {{ ev_soc }}%. Powerwall:
+            {{ powerwall_soc }}%. HEMS will pause native charging if the house
+            or Powerwall cannot be protected.
+          data:
+            tag: hems_ev_post_target_native_handoff
+            channel: HEMS EV Decisions
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          title: HEMS EV continuing on excess solar
+          message: >-
+            {{ handoff_message }} Today's target remains {{ ev_target }}%; no
+            grid charging or 100% target was authorised. Connection plan:
+            {{ connection_plan }}. EV: {{ ev_soc }}%. Powerwall:
+            {{ powerwall_soc }}%. HEMS will pause native charging if the house
+            or Powerwall cannot be protected.
+          data:
+            tag: hems_ev_post_target_native_handoff
+            channel: HEMS EV Decisions
+    mode: single
+
+  - id: hems_ev_post_target_solar_reset_20260802
+    alias: HEMS - EV Post-Target Solar Reset
+    description: >-
+      Clears the per-connection post-target choice after both integrations
+      confirm unplugged, and starts each day with no stale decision.
+    triggers:
+      - trigger: template
+        value_template: >-
+          {{
+            is_state('binary_sensor.atto_3_plug', 'off')
+            and is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'off'
+            )
+          }}
+        for: "00:01:00"
+        id: unplugged
+      - trigger: time
+        at: "00:05:00"
+        id: daily_reset
+      - trigger: template
+        value_template: >-
+          {% set soc = states('sensor.hems_effective_ev_soc') %}
+          {{ is_number(soc) and (soc | float) >= 99.5 }}
+        for: "00:01:00"
+        id: ev_full
+    conditions: []
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.hems_ev_post_target_solar_choice
+        data:
+          option: none
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_solar_choice
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_solar_choice
+      - action: notify.mobile_app_primary_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_native_handoff
+      - action: notify.mobile_app_secondary_ev_phone
+        continue_on_error: true
+        data:
+          message: clear_notification
+          data:
+            tag: hems_ev_post_target_native_handoff
+    mode: single

@@ -1,0 +1,738 @@
+# HEMS Solar Dual-Latch Curtailment Package - FULL REPLACEMENT
+#
+# Replace the complete contents of the existing solar-curtailment hysteresis
+# package with this file. Do not load this beside the 2026-08-08 package,
+# because both packages define the same coordinated sensor and full latch.
+#
+# This package never writes to SolarEdge. HEMS - Solar Worker remains the only
+# automation authorised to change the inverter export-control site limit.
+#
+# State model:
+# - OPEN: follows the bounded Solar Brain request.
+# - RECOVERY: holds 2500 W while Powerwall is below the full-curtailment rearm
+#   SOC. Short Brain changes back to 5000 W cannot release this state.
+# - FULL_CURTAILMENT: holds 100 W from 100% down to the configured 90% release
+#   SOC, provided the entry forecast gate is satisfied.
+#
+# Immediate exits:
+# - Solar automatic control disabled.
+# - Solar manual override enabled.
+# - The home SolarEdge charger confirms the EV is connected and still has an
+#   authorised charging demand. Normal plans compare SOC with today's selected
+#   target; Solar Only remains open to 100%. Unavailable SOC/target blocks
+#   fail-safe. BYD plug/charging telemetry never proves a home session.
+#
+# Controlled RECOVERY release:
+# - Minimum recovery-hold time has elapsed.
+# - Brain has continuously requested more than the minimum limit for the
+#   configured confirmation period.
+# - Effective feed-in price has continuously remained above the configured
+#   release price for the same confirmation period.
+
+input_boolean:
+  hems_solar_curtailment_latched:
+    name: HEMS Solar Curtailment Latched
+    icon: mdi:solar-power-variant-outline
+
+  hems_solar_recovery_latched:
+    name: HEMS Solar Recovery Latched
+    icon: mdi:solar-power-variant
+
+  hems_solar_external_control_conflict:
+    name: HEMS Solar External Control Conflict
+    icon: mdi:connection
+
+input_datetime:
+  hems_solar_external_control_retry_after:
+    name: HEMS Solar External Control Retry After
+    has_date: true
+    has_time: true
+    icon: mdi:timer-lock-outline
+
+input_number:
+  hems_solar_curtailment_release_soc:
+    name: HEMS Solar Curtailment Release SOC
+    icon: mdi:battery-arrow-down-outline
+    min: 50
+    max: 98
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    initial: 90
+
+  hems_solar_curtailment_rearm_soc:
+    name: HEMS Solar Curtailment Rearm SOC
+    icon: mdi:battery-check-outline
+    min: 91
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    initial: 100
+
+  hems_solar_curtailment_recovery_limit:
+    name: HEMS Solar Curtailment Recovery Limit
+    icon: mdi:transmission-tower-export
+    min: 100
+    max: 5000
+    step: 100
+    unit_of_measurement: W
+    mode: box
+    initial: 2500
+
+  hems_solar_forecast_reserve_margin:
+    name: HEMS Solar Forecast Reserve Margin
+    icon: mdi:weather-sunny-alert
+    min: 0
+    max: 10
+    step: 0.1
+    unit_of_measurement: kWh
+    mode: box
+    initial: 1
+
+  hems_solar_recovery_minimum_hold_minutes:
+    name: HEMS Solar Recovery Minimum Hold Minutes
+    icon: mdi:timer-lock-outline
+    min: 5
+    max: 180
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    initial: 30
+
+  hems_solar_recovery_release_confirmation_minutes:
+    name: HEMS Solar Recovery Release Confirmation Minutes
+    icon: mdi:timer-check-outline
+    min: 5
+    max: 60
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    initial: 15
+
+  hems_solar_recovery_release_feed_in_price:
+    name: HEMS Solar Recovery Release Feed-In Price
+    icon: mdi:cash-check
+    min: -1
+    max: 1
+    step: 0.01
+    unit_of_measurement: AUD/kWh
+    mode: box
+    initial: 0
+
+  hems_solar_external_control_backoff_minutes:
+    name: HEMS Solar External Control Backoff Minutes
+    icon: mdi:timer-pause-outline
+    min: 10
+    max: 120
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    initial: 30
+
+template:
+  - sensor:
+      - name: HEMS EV Curtailment Demand
+        unique_id: hems_ev_curtailment_demand_v1
+        icon: mdi:car-electric-outline
+        state: >-
+          {% set connected = is_state(
+            'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+          ) %}
+          {% set soc = states('sensor.hems_effective_ev_soc') %}
+          {% set target = states('sensor.hems_ev_target_today') %}
+          {% set plan = states('input_select.hems_ev_connection_charge_plan') %}
+          {% set solar_only = plan == 'Solar Only' %}
+          {% set effective_target = 100 if solar_only
+              else (target | float if is_number(target) else none) %}
+          {% if not connected %}
+            CLEAR
+          {% elif not is_number(soc) or effective_target is none %}
+            BLOCK
+          {% elif (soc | float) + 0.01 < (effective_target | float) %}
+            BLOCK
+          {% else %}
+            CLEAR
+          {% endif %}
+        attributes:
+          home_connected: >-
+            {{ is_state('binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on') }}
+          ev_soc: "{{ states('sensor.hems_effective_ev_soc') }}"
+          selected_target: "{{ states('sensor.hems_ev_target_today') }}"
+          connection_plan: >-
+            {{ states('input_select.hems_ev_connection_charge_plan') }}
+          effective_curtailment_target: >-
+            {% if is_state(
+              'input_select.hems_ev_connection_charge_plan', 'Solar Only'
+            ) %}
+              100
+            {% else %}
+              {{ states('sensor.hems_ev_target_today') }}
+            {% endif %}
+          authorised_demand_satisfied: >-
+            {% set soc = states('sensor.hems_effective_ev_soc') %}
+            {% set target = states('sensor.hems_ev_target_today') %}
+            {% set effective_target = 100 if is_state(
+              'input_select.hems_ev_connection_charge_plan', 'Solar Only'
+            ) else (target | float if is_number(target) else none) %}
+            {{
+              is_number(soc)
+              and effective_target is not none
+              and (soc | float) + 0.01 >= (effective_target | float)
+            }}
+          reason: >-
+            {% set connected = is_state(
+              'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+            ) %}
+            {% set soc = states('sensor.hems_effective_ev_soc') %}
+            {% set target = states('sensor.hems_ev_target_today') %}
+            {% set plan = states('input_select.hems_ev_connection_charge_plan') %}
+            {% set effective_target = 100 if plan == 'Solar Only'
+                else (target | float if is_number(target) else none) %}
+            {% if not connected %}
+              EV_NOT_HOME
+            {% elif not is_number(soc) %}
+              EV_SOC_UNAVAILABLE_FAIL_SAFE
+            {% elif effective_target is none %}
+              EV_TARGET_UNAVAILABLE_FAIL_SAFE
+            {% elif (soc | float) + 0.01 < (effective_target | float) %}
+              {{ 'SOLAR_ONLY_OPEN_TO_100' if plan == 'Solar Only'
+                 else 'AUTHORISED_TARGET_NOT_MET' }}
+            {% else %}
+              AUTHORISED_EV_DEMAND_SATISFIED
+            {% endif %}
+
+      - name: HEMS Coordinated Solar Export Limit
+        unique_id: hems_coordinated_solar_export_limit_v1
+        icon: mdi:transmission-tower-export
+        unit_of_measurement: W
+        state_class: measurement
+        availability: >-
+          {{
+            is_number(states('input_number.maximum_solar_export'))
+            and is_number(states('input_number.hems_solar_minimum_export_limit'))
+            and is_number(states('input_number.hems_solar_curtailment_recovery_limit'))
+            and is_number(states('input_number.minimum_grid_feed'))
+          }}
+        state: >-
+          {% set maximum = states('input_number.maximum_solar_export') | float(5000) %}
+          {% set minimum = states('input_number.hems_solar_minimum_export_limit') | float(100) %}
+          {% set recovery_raw = states('input_number.hems_solar_curtailment_recovery_limit') | float(2500) %}
+          {% set recovery = [[recovery_raw, minimum] | max, maximum] | min %}
+          {% set requested_raw = states('sensor.hems_solar_export_limit') %}
+          {% set requested = requested_raw | float(maximum) %}
+          {% set bounded_request = [[requested, minimum] | max, maximum] | min %}
+          {% set automatic = is_state('input_boolean.hems_solar_automatic_control_enabled', 'on') %}
+          {% set manual_override = is_state('input_boolean.hems_solar_manual_override', 'on') %}
+          {% set solar_raw = states('sensor.hems_effective_solar_power') %}
+          {% set remaining_raw = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+          {% set solar_finished =
+            is_state('sun.sun', 'below_horizon')
+            or (
+              is_number(solar_raw)
+              and solar_raw | float <= 0.05
+              and is_number(remaining_raw)
+              and remaining_raw | float <= 0.05
+            )
+          %}
+          {% set feed_in_raw = states('sensor.hems_effective_feed_in_price') %}
+          {% set minimum_grid_feed = states('input_number.minimum_grid_feed') | float %}
+          {% set above_minimum_grid_feed =
+            is_number(feed_in_raw)
+            and feed_in_raw | float > minimum_grid_feed
+          %}
+          {% set cycle_phase = states(
+            'input_select.hems_solar_powerwall_soc_cycle_phase'
+          ) %}
+          {% set cycle_live = is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+            'on'
+          ) and cycle_phase in ['DISCHARGE', 'RECOVERY'] %}
+          {% set full_latched = is_state('input_boolean.hems_solar_curtailment_latched', 'on') %}
+          {% set recovery_latched = is_state('input_boolean.hems_solar_recovery_latched', 'on') %}
+          {% set powerwall_raw = states('sensor.hems_effective_powerwall') %}
+          {% set rearm = states('input_number.hems_solar_curtailment_rearm_soc') | float(100) %}
+          {% set ev_curtailment_block =
+            states('sensor.hems_ev_curtailment_demand') != 'CLEAR'
+          %}
+          {% set curtailment_requested = requested <= minimum + 50 %}
+          {% set forecast_raw = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+          {% set house_raw = states('sensor.house_energy_remaining_today') %}
+          {% set powerwall_required_raw = states('sensor.powerwall_energy_required') %}
+          {% set margin = states('input_number.hems_solar_forecast_reserve_margin') | float(1) %}
+          {% set forecast_valid =
+            is_number(forecast_raw)
+            and is_number(house_raw)
+            and is_number(powerwall_required_raw)
+          %}
+          {% set forecast_headroom =
+            (forecast_raw | float(0))
+            - (house_raw | float(0))
+            - (powerwall_required_raw | float(0))
+          %}
+          {% set forecast_can_recover = forecast_valid and forecast_headroom >= margin %}
+          {% if not automatic or manual_override %}
+            {{ maximum | round(0) }}
+          {% elif solar_finished %}
+            {{ maximum | round(0) }}
+          {% elif ev_curtailment_block %}
+            {{ maximum | round(0) }}
+          {% elif cycle_live and cycle_phase == 'DISCHARGE' %}
+            {{ minimum | round(0) }}
+          {% elif cycle_live and cycle_phase == 'RECOVERY' %}
+            {{ maximum | round(0) }}
+          {% elif full_latched %}
+            {{ minimum | round(0) }}
+          {% elif recovery_latched %}
+            {{ minimum | round(0) }}
+          {% elif above_minimum_grid_feed %}
+            {{ maximum | round(0) }}
+          {% elif curtailment_requested and is_number(powerwall_raw) and powerwall_raw | float < rearm %}
+            {{ minimum | round(0) }}
+          {% elif curtailment_requested and not forecast_can_recover %}
+            {{ minimum | round(0) }}
+          {% else %}
+            {{ bounded_request | round(0) }}
+          {% endif %}
+        attributes:
+          brain_request: >-
+            {{ states('sensor.hems_solar_export_limit') }}
+          coordination_state: >-
+            {% if is_state('input_boolean.hems_solar_curtailment_latched', 'on') %}
+              FULL_CURTAILMENT
+            {% elif is_state('input_boolean.hems_solar_recovery_latched', 'on') %}
+              RECOVERY
+            {% else %}
+              OPEN
+            {% endif %}
+          full_latch_state: >-
+            {{ 'LATCHED' if is_state('input_boolean.hems_solar_curtailment_latched', 'on') else 'OPEN' }}
+          recovery_latch_state: >-
+            {{ 'LATCHED' if is_state('input_boolean.hems_solar_recovery_latched', 'on') else 'OPEN' }}
+          recovery_latch_age_minutes: >-
+            {% if is_state('input_boolean.hems_solar_recovery_latched', 'on') %}
+              {{ ((as_timestamp(now()) - as_timestamp(states.input_boolean.hems_solar_recovery_latched.last_changed)) / 60) | round(1) }}
+            {% else %}
+              0
+            {% endif %}
+          solar_finished: >-
+            {% set solar = states('sensor.hems_effective_solar_power') %}
+            {% set remaining = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+            {{
+              is_state('sun.sun', 'below_horizon')
+              or (
+                is_number(solar)
+                and solar | float <= 0.05
+                and is_number(remaining)
+                and remaining | float <= 0.05
+              )
+            }}
+          external_control_conflict: >-
+            {{ is_state('input_boolean.hems_solar_external_control_conflict', 'on') }}
+          external_control_retry_after: >-
+            {{ states('input_datetime.hems_solar_external_control_retry_after') }}
+          powerwall_soc: >-
+            {{ states('sensor.hems_effective_powerwall') }}
+          release_soc: >-
+            {{ states('input_number.hems_solar_curtailment_release_soc') }}
+          rearm_soc: >-
+            {{ states('input_number.hems_solar_curtailment_rearm_soc') }}
+          effective_feed_in_price: >-
+            {{ states('sensor.hems_effective_feed_in_price') }}
+          forecast_headroom_kwh: >-
+            {% set forecast = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+            {% set house = states('sensor.house_energy_remaining_today') %}
+            {% set battery = states('sensor.powerwall_energy_required') %}
+            {% if is_number(forecast) and is_number(house) and is_number(battery) %}
+              {{ (forecast | float - house | float - battery | float) | round(2) }}
+            {% else %}
+              unavailable
+            {% endif %}
+          decision_reason: >-
+            {% set maximum = states('input_number.maximum_solar_export') | float(5000) %}
+            {% set minimum = states('input_number.hems_solar_minimum_export_limit') | float(100) %}
+            {% set requested_raw = states('sensor.hems_solar_export_limit') %}
+            {% set requested = requested_raw | float(maximum) %}
+            {% set powerwall_raw = states('sensor.hems_effective_powerwall') %}
+            {% set rearm = states('input_number.hems_solar_curtailment_rearm_soc') | float(100) %}
+            {% set ev_soc_raw = states('sensor.hems_effective_ev_soc') %}
+            {% set solar_raw = states('sensor.hems_effective_solar_power') %}
+            {% set remaining_raw = states('sensor.solcast_pv_forecast_forecast_remaining_today') %}
+            {% set solar_finished =
+              is_state('sun.sun', 'below_horizon')
+              or (
+                is_number(solar_raw)
+                and solar_raw | float <= 0.05
+                and is_number(remaining_raw)
+                and remaining_raw | float <= 0.05
+              )
+            %}
+            {% set feed_in_raw = states('sensor.hems_effective_feed_in_price') %}
+            {% set minimum_grid_feed = states('input_number.minimum_grid_feed') | float(0.01) %}
+            {% set cycle_phase = states(
+              'input_select.hems_solar_powerwall_soc_cycle_phase'
+            ) %}
+            {% set cycle_live = is_state(
+              'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+              'on'
+            ) and cycle_phase in ['DISCHARGE', 'RECOVERY'] %}
+            {% set ev_curtailment_block =
+              states('sensor.hems_ev_curtailment_demand') != 'CLEAR'
+            %}
+            {% if is_state('input_boolean.hems_solar_manual_override', 'on') %}
+              MANUAL_OVERRIDE
+            {% elif not is_state('input_boolean.hems_solar_automatic_control_enabled', 'on') %}
+              AUTOMATIC_CONTROL_DISABLED
+            {% elif solar_finished %}
+              SOLAR_FINISHED_NORMAL_EXPORT_LIMIT
+            {% elif ev_curtailment_block %}
+              EV_AUTHORISED_CHARGING_DEMAND_CURTAILMENT_BLOCKED
+            {% elif cycle_live and cycle_phase == 'DISCHARGE' %}
+              SOC_CYCLE_DISCHARGE_100W_TO_PROTECTED_FLOOR
+            {% elif cycle_live and cycle_phase == 'RECOVERY' %}
+              SOC_CYCLE_RECOVERY_5000W_WITH_PROTECTED_FLOOR
+            {% elif is_state('input_boolean.hems_solar_curtailment_latched', 'on') %}
+              FULL_CURTAILMENT_LATCHED_UNTIL_RELEASE_SOC
+            {% elif is_state('input_boolean.hems_solar_recovery_latched', 'on') %}
+              RECOVERY_LATCHED_UNTIL_STABLE_RELEASE
+            {% elif is_number(feed_in_raw)
+                  and feed_in_raw | float > minimum_grid_feed %}
+              ABOVE_MINIMUM_GRID_FEED_NORMAL_EXPORT
+            {% elif requested <= minimum + 50 and is_number(powerwall_raw) and powerwall_raw | float < rearm %}
+              POWERWALL_RECOVERY_LATCH_ENTRY
+            {% elif requested <= minimum + 50 %}
+              FORECAST_PROTECTION_RECOVERY_LIMIT
+            {% elif requested < maximum - 50 %}
+              PARTIAL_CURTAILMENT_REQUEST
+            {% else %}
+              NORMAL_EXPORT_LIMIT
+            {% endif %}
+          release_policy: >-
+            FULL_100W_TO_90_PERCENT__RECOVERY_2500W_MINIMUM_HOLD_AND_STABLE_POSITIVE_RELEASE
+          forecast_policy: >-
+            ENTRY_GATE_ONLY_WHILE_FULL_CURTAILMENT_LATCHED
+
+automation:
+  - id: hems_solar_curtailment_dual_latch_20260815
+    alias: HEMS - Solar Curtailment Dual Latch
+    description: >-
+      Maintains the persistent 100 W full-curtailment latch and the persistent
+      2500 W recovery latch. It never writes to SolarEdge; only HEMS - Solar
+      Worker may control the inverter.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - sensor.hems_solar_export_limit
+          - sensor.hems_effective_powerwall
+          - sensor.hems_effective_feed_in_price
+          - sensor.hems_effective_solar_power
+          - sensor.solcast_pv_forecast_forecast_remaining_today
+          - sensor.house_energy_remaining_today
+          - sensor.powerwall_energy_required
+          - input_boolean.hems_solar_automatic_control_enabled
+          - input_boolean.hems_solar_manual_override
+          - input_number.hems_solar_curtailment_release_soc
+          - input_number.hems_solar_curtailment_rearm_soc
+          - input_number.hems_solar_forecast_reserve_margin
+          - input_number.hems_solar_recovery_minimum_hold_minutes
+          - input_number.hems_solar_recovery_release_confirmation_minutes
+          - input_number.hems_solar_recovery_release_feed_in_price
+          - input_number.minimum_grid_feed
+          - input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled
+          - input_select.hems_solar_powerwall_soc_cycle_phase
+          - binary_sensor.solaredge_ev_charger_ev_charger_connected
+          - binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled
+          - sensor.solaredge_ev_charger_ev_excess_solar_status
+          - sensor.hems_effective_ev_soc
+          - input_select.hems_ev_connection_charge_plan
+          - input_boolean.hems_ev_manual_override
+          - sun.sun
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+    condition: []
+    variables:
+      controls_active: >-
+        {{
+          is_state('input_boolean.hems_solar_automatic_control_enabled', 'on')
+          and is_state('input_boolean.hems_solar_manual_override', 'off')
+        }}
+      solar_raw: >-
+        {{ states('sensor.hems_effective_solar_power') }}
+      remaining_raw: >-
+        {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') }}
+      solar_finished: >-
+        {{
+          is_state('sun.sun', 'below_horizon')
+          or (
+            is_number(solar_raw)
+            and solar_raw | float <= 0.05
+            and is_number(remaining_raw)
+            and remaining_raw | float <= 0.05
+          )
+        }}
+      full_latched: >-
+        {{ is_state('input_boolean.hems_solar_curtailment_latched', 'on') }}
+      recovery_latched: >-
+        {{ is_state('input_boolean.hems_solar_recovery_latched', 'on') }}
+      minimum: >-
+        {{ states('input_number.hems_solar_minimum_export_limit') | float(100) }}
+      requested_raw: >-
+        {{ states('sensor.hems_solar_export_limit') }}
+      powerwall_raw: >-
+        {{ states('sensor.hems_effective_powerwall') }}
+      feed_in_raw: >-
+        {{ states('sensor.hems_effective_feed_in_price') }}
+      minimum_grid_feed: >-
+        {{ states('input_number.minimum_grid_feed') | float(0.01) }}
+      cycle_phase: >-
+        {{ states('input_select.hems_solar_powerwall_soc_cycle_phase') }}
+      cycle_live: >-
+        {{
+          is_state(
+            'input_boolean.hems_solar_powerwall_soc_cycle_live_control_enabled',
+            'on'
+          )
+          and cycle_phase in ['DISCHARGE', 'RECOVERY']
+        }}
+      release_soc: >-
+        {{ states('input_number.hems_solar_curtailment_release_soc') | float(90) }}
+      rearm_soc: >-
+        {{ states('input_number.hems_solar_curtailment_rearm_soc') | float(100) }}
+      minimum_hold_minutes: >-
+        {{ states('input_number.hems_solar_recovery_minimum_hold_minutes') | float(30) }}
+      confirmation_minutes: >-
+        {{ states('input_number.hems_solar_recovery_release_confirmation_minutes') | float(15) }}
+      release_feed_in_price: >-
+        {{ states('input_number.hems_solar_recovery_release_feed_in_price') | float(0) }}
+      forecast_raw: >-
+        {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') }}
+      house_raw: >-
+        {{ states('sensor.house_energy_remaining_today') }}
+      powerwall_required_raw: >-
+        {{ states('sensor.powerwall_energy_required') }}
+      margin: >-
+        {{ states('input_number.hems_solar_forecast_reserve_margin') | float(1) }}
+      forecast_valid: >-
+        {{
+          is_number(forecast_raw)
+          and is_number(house_raw)
+          and is_number(powerwall_required_raw)
+        }}
+      forecast_headroom: >-
+        {{
+          (forecast_raw | float(0))
+          - (house_raw | float(0))
+          - (powerwall_required_raw | float(0))
+        }}
+      forecast_can_recover: >-
+        {{ forecast_valid and (forecast_headroom | float) >= (margin | float) }}
+      ev_curtailment_block: >-
+        {{ states('sensor.hems_ev_curtailment_demand') != 'CLEAR' }}
+      curtailment_requested: >-
+        {{ is_number(requested_raw) and requested_raw | float <= minimum | float + 50 }}
+      recovery_age_seconds: >-
+        {% if recovery_latched %}
+          {{ as_timestamp(now()) - as_timestamp(states.input_boolean.hems_solar_recovery_latched.last_changed) }}
+        {% else %}
+          0
+        {% endif %}
+      brain_request_age_seconds: >-
+        {{ as_timestamp(now()) - as_timestamp(states.sensor.hems_solar_export_limit.last_changed) }}
+      feed_in_age_seconds: >-
+        {{ as_timestamp(now()) - as_timestamp(states.sensor.hems_effective_feed_in_price.last_changed) }}
+      stable_price_release_ready: >-
+        {{
+          (full_latched or recovery_latched)
+          and not curtailment_requested
+          and is_number(feed_in_raw)
+          and feed_in_raw | float > minimum_grid_feed | float
+          and (
+            not recovery_latched
+            or recovery_age_seconds | float >= minimum_hold_minutes | float * 60
+          )
+          and brain_request_age_seconds | float >= confirmation_minutes | float * 60
+          and feed_in_age_seconds | float >= confirmation_minutes | float * 60
+        }}
+    action:
+      - choose:
+          - conditions: "{{ not controls_active }}"
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_solar_curtailment_latched
+                    - input_boolean.hems_solar_recovery_latched
+
+          - conditions: "{{ solar_finished }}"
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_solar_curtailment_latched
+                    - input_boolean.hems_solar_recovery_latched
+
+          - conditions: "{{ cycle_live }}"
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_solar_curtailment_latched
+                    - input_boolean.hems_solar_recovery_latched
+
+          - conditions: "{{ ev_curtailment_block }}"
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_solar_curtailment_latched
+                    - input_boolean.hems_solar_recovery_latched
+
+          - conditions: >-
+              {{
+                full_latched
+                and (
+                  not is_number(powerwall_raw)
+                  or powerwall_raw | float <= release_soc | float
+                )
+              }}
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.hems_solar_curtailment_latched
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.hems_solar_recovery_latched
+
+          - conditions: >-
+              {{
+                recovery_latched
+                and is_number(powerwall_raw)
+                and powerwall_raw | float >= rearm_soc | float
+                and curtailment_requested
+                and forecast_can_recover
+              }}
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.hems_solar_recovery_latched
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.hems_solar_curtailment_latched
+
+          - conditions: >-
+              {{
+                not full_latched
+                and not recovery_latched
+                and curtailment_requested
+                and is_number(powerwall_raw)
+                and powerwall_raw | float >= rearm_soc | float
+                and forecast_can_recover
+              }}
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.hems_solar_curtailment_latched
+
+          - conditions: >-
+              {{
+                not full_latched
+                and not recovery_latched
+                and curtailment_requested
+                and (
+                  not is_number(powerwall_raw)
+                  or powerwall_raw | float < rearm_soc | float
+                  or not forecast_can_recover
+                )
+              }}
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.hems_solar_recovery_latched
+
+          - conditions: "{{ stable_price_release_ready }}"
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id:
+                    - input_boolean.hems_solar_curtailment_latched
+                    - input_boolean.hems_solar_recovery_latched
+
+  - id: hems_solar_conflict_safety_reset_20260818
+    alias: HEMS - Solar Conflict Safety Reset
+    description: >-
+      Clears the external-control conflict backoff when curtailment is no
+      longer required. The Solar Worker owns conflict detection and retries.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_boolean.hems_solar_external_control_conflict
+          - sensor.hems_coordinated_solar_export_limit
+          - sensor.hems_effective_feed_in_price
+          - sensor.hems_effective_solar_power
+          - sun.sun
+          - input_boolean.hems_solar_automatic_control_enabled
+          - input_boolean.hems_solar_manual_override
+          - binary_sensor.solaredge_ev_charger_ev_charger_connected
+          - binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled
+          - sensor.solaredge_ev_charger_ev_excess_solar_status
+          - sensor.hems_effective_ev_soc
+      - platform: homeassistant
+        event: start
+    variables:
+      maximum: "{{ states('input_number.maximum_solar_export') | float(5000) }}"
+      coordinated: "{{ states('sensor.hems_coordinated_solar_export_limit') }}"
+      solar: "{{ states('sensor.hems_effective_solar_power') }}"
+      remaining: "{{ states('sensor.solcast_pv_forecast_forecast_remaining_today') }}"
+      solar_finished: >-
+        {{
+          is_state('sun.sun', 'below_horizon')
+          or (
+            is_number(solar)
+            and solar | float <= 0.05
+            and is_number(remaining)
+            and remaining | float <= 0.05
+          )
+        }}
+      ev_curtailment_block: >-
+        {{ states('sensor.hems_ev_curtailment_demand') != 'CLEAR' }}
+      safe_to_clear: >-
+        {{
+          is_state('input_boolean.hems_solar_automatic_control_enabled', 'off')
+          or is_state('input_boolean.hems_solar_manual_override', 'on')
+          or solar_finished
+          or ev_curtailment_block
+          or (
+            is_number(coordinated)
+            and coordinated | float >= maximum | float - 50
+          )
+        }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.hems_solar_external_control_conflict
+        state: "on"
+      - condition: template
+        value_template: "{{ safe_to_clear }}"
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.hems_solar_external_control_conflict
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hems_solar_external_control_retry_after
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: notify.mobile_app_primary_phone
+        data:
+          title: HEMS Solar control conflict cleared
+          message: >-
+            Solar curtailment is no longer required, so HEMS has cleared the
+            external-control backoff. The normal export limit is
+            {{ maximum | round(0) | int }} W.
+          data:
+            tag: hems_solar_external_conflict
+            group: hems_solar
+            alert_once: true

@@ -56,6 +56,10 @@ read-only sensors and test platform have been commissioned.
 - EV urgent recovery, approved recovery and target charging
 - Powerwall/EV interlock and durable command guards
 - negative-feed-in solar curtailment with minimum hold periods
+- dual-latch curtailment with connected-EV demand interlocking
+- optional intraday Powerwall SOC cycling with an independently protected floor
+- end-of-day Powerwall reserve protection during SOC-cycle recovery
+- Solar Only EV handover to guarded native excess-solar charging
 - cloudy-day grid-price approval
 - Amber advanced price forecasting
 - Solcast forecast snapshots and forecast learning
@@ -63,6 +67,15 @@ read-only sensors and test platform have been commissioned.
 - daily performance summaries, critical-data checks and Worker health reporting
 - rolling 7/30-day solar-forecast and overnight-usage learning
 - commissioning and visual energy-flow dashboards
+
+## 0.3 live-validation milestone
+
+The 0.3 alpha control chain has completed a live low/negative-price solar day.
+The coordinated export request and SolarEdge site limit remained aligned,
+curtailment held export near zero while the Powerwall charged to full, and the
+normal export limit was restored at the end of the solar window. The optional
+SOC-cycle coordinator correctly abstained when its admission runway was not
+available, leaving ordinary curtailment in control.
 
 ## Optional observation package
 

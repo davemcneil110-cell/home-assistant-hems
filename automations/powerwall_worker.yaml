@@ -1,28 +1,54 @@
 alias: HEMS - Powerwall Worker
 description: >-
-  Sole Powerwall control worker. Applies the current coordinated Powerwall mode
-  and reserve only while Automatic Grid Charging is enabled. With automatic
-  control disabled it restores Self Consumption and the configured minimum
-  reserve. Manual Override blocks all commands. Each run sends at most one mode
-  command and one reserve command, waits for authoritative readback, and
-  silently exits if its captured request has been superseded.
+  Sole Powerwall control worker. Serialises coordinated Powerwall decisions so
+  simultaneous mode and reserve changes cannot restart or fight each other.
+  The 2026-08-01 planner revision distinguishes current-SOC hold requests from
+  intentional target charging and accepts the guarded native-excess 100% hold.
+  Backup requests apply reserve first and then mode. Self Consumption requests
+  apply mode first and then lower the reserve. Each run captures one complete
+  decision, revalidates it before any hardware write, sends each required
+  command at most once, waits for authoritative Teslemetry readback, and exits
+  silently when a newer decision supersedes it. An observed unowned SolarEdge
+  session is a hard block against lowering the Powerwall reserve.
 triggers:
   - trigger: state
     entity_id:
       - sensor.hems_coordinated_powerwall_mode
       - sensor.hems_coordinated_powerwall_reserve
-    for: "00:00:30"
+    for: "00:01:00"
+    id: coordinated_decision
+
   - trigger: state
     entity_id:
       - input_boolean.automatic_grid_charging_enabled
       - input_boolean.hems_powerwall_manual_override
+    id: control_change
+
   - trigger: state
     entity_id:
       - input_number.minimum_power_reserve
       - input_number.powerwall_target
+    for: "00:00:30"
+    id: target_change
+
+  - trigger: state
+    entity_id: sensor.hems_ev_powerwall_interlock_request
+    id: ev_interlock_change
+
+  - trigger: state
+    entity_id:
+      - sensor.hems_powerwall_grid_charge_plan
+      - sensor.hems_powerwall_brain_reserve
+      - input_select.hems_native_excess_supervisor_state
+    for: "00:00:30"
+    id: planner_change
+
   - trigger: time_pattern
     minutes: "/15"
+    id: periodic_reconcile
+
 conditions: []
+
 actions:
   - condition: state
     entity_id: input_boolean.hems_powerwall_manual_override
@@ -38,8 +64,13 @@ actions:
       minimum_reserve_raw: "{{ states('input_number.minimum_power_reserve') }}"
       interlock_request: >-
         {{ states('sensor.hems_ev_powerwall_interlock_request') }}
+      powerwall_plan: >-
+        {{ states('sensor.hems_powerwall_grid_charge_plan') }}
+      native_excess_state: >-
+        {{ states('input_select.hems_native_excess_supervisor_state') }}
 
   - condition: template
+    alias: Required planning and device inputs are valid
     value_template: >-
       {{
         is_number(minimum_reserve_raw)
@@ -50,13 +81,9 @@ actions:
             and is_number(coordinated_reserve_raw)
           )
         )
-      }}
-
-  - condition: template
-    value_template: >-
-      {{
-        states('select.house_home_energy_gateway_teslemetry_operation_mode')
-          in ['backup', 'self_consumption']
+        and states(
+          'select.house_home_energy_gateway_teslemetry_operation_mode'
+        ) in ['backup', 'self_consumption']
         and is_number(states(
           'number.house_home_energy_gateway_teslemetry_backup_reserve'
         ))
@@ -78,96 +105,10 @@ actions:
         {{ ([[requested, 0] | max, 100] | min) | round(0) }}
 
   - condition: template
-    value_template: >-
-      {% set current_mode = states(
-        'select.house_home_energy_gateway_teslemetry_operation_mode'
-      ) %}
-      {% set current_reserve = states(
-        'number.house_home_energy_gateway_teslemetry_backup_reserve'
-      ) | float %}
-      {{
-        current_mode != desired_mode
-        or ((current_reserve - (desired_reserve | float)) | abs >= 0.5)
-      }}
-
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: >-
-              {{ states(
-                'select.house_home_energy_gateway_teslemetry_operation_mode'
-              ) != desired_mode }}
-        sequence:
-          - action: select.select_option
-            target:
-              entity_id: >-
-                select.house_home_energy_gateway_teslemetry_operation_mode
-            data:
-              option: "{{ desired_mode }}"
-
-          - delay: "00:00:40"
-
-          - condition: template
-            alias: Captured request is still current after mode settling
-            value_template: >-
-              {% set live_auto = is_state(
-                'input_boolean.automatic_grid_charging_enabled',
-                'on'
-              ) %}
-              {% set live_mode = states(
-                'sensor.hems_coordinated_powerwall_mode'
-              ) if live_auto else 'self_consumption' %}
-              {% set live_reserve_raw = states(
-                'sensor.hems_coordinated_powerwall_reserve'
-              ) if live_auto else states(
-                'input_number.minimum_power_reserve'
-              ) %}
-              {{
-                is_state('input_boolean.hems_powerwall_manual_override', 'off')
-                and live_auto == automatic_control_enabled
-                and live_mode == desired_mode
-                and is_number(live_reserve_raw)
-                and (
-                  ((live_reserve_raw | float) - (desired_reserve | float))
-                    | abs < 0.5
-                )
-                and states('sensor.hems_ev_powerwall_interlock_request')
-                  == interlock_request
-              }}
-
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: >-
-                      {{ not is_state(
-                        'select.house_home_energy_gateway_teslemetry_operation_mode',
-                        desired_mode
-                      ) }}
-                sequence:
-                  - action: notify.mobile_app_primary_phone
-                    continue_on_error: true
-                    data:
-                      title: HEMS Powerwall setting not confirmed
-                      message: >-
-                        The requested Powerwall mode did not remain confirmed
-                        after authoritative readback. Requested: {{ desired_mode }}
-                        at {{ desired_reserve | float | round(0) | int }}%.
-                        Actual: {{ states(
-                          'select.house_home_energy_gateway_teslemetry_operation_mode'
-                        ) }} at {{ states(
-                          'number.house_home_energy_gateway_teslemetry_backup_reserve'
-                        ) }}%. No repeated command was sent.
-                      data:
-                        tag: hems_powerwall_worker_status
-                        alert_once: true
-                  - stop: Powerwall mode did not persist
-
-  - condition: template
-    alias: Captured request is still current before reserve command
+    alias: Captured request is still current before any hardware command
     value_template: >-
       {% set live_auto = is_state(
-        'input_boolean.automatic_grid_charging_enabled',
-        'on'
+        'input_boolean.automatic_grid_charging_enabled', 'on'
       ) %}
       {% set live_mode = states(
         'sensor.hems_coordinated_powerwall_mode'
@@ -188,26 +129,299 @@ actions:
           == interlock_request
       }}
 
+  - condition: template
+    alias: Never lower Powerwall protection during an unowned native session
+    value_template: >-
+      {% set charger_entity =
+        states.binary_sensor.solaredge_ev_charger_ev_charger_charging %}
+      {% set charger_binary = charger_entity.state
+        if charger_entity is not none else 'unavailable' %}
+      {% set charger_power_raw = states(
+        'sensor.solaredge_ev_charger_ev_charger_power'
+      ) %}
+      {% set charger_status = states(
+        'sensor.solaredge_ev_charger_ev_charger_status'
+      ) | lower %}
+      {% set byd_charging = states('binary_sensor.atto_3_charging') %}
+      {% set byd_power_raw = states('sensor.atto_3_battery_power') %}
+      {% set raw_on_age =
+        as_timestamp(now()) - as_timestamp(charger_entity.last_changed)
+        if charger_entity is not none else 999999 %}
+      {% set charger_charging =
+        (charger_binary == 'on' and raw_on_age >= 0 and raw_on_age <= 600)
+        or (
+          is_number(charger_power_raw)
+          and charger_power_raw | float >= 0.5
+        )
+        or charger_status == 'charging'
+        or byd_charging == 'on'
+        or (
+          is_state('binary_sensor.atto_3_plug', 'on')
+          and is_number(byd_power_raw)
+          and (byd_power_raw | float | abs) >= 1000
+        ) %}
+      {% set observed_unowned_native =
+        is_state('input_boolean.hems_native_excess_supervisor_enabled', 'on')
+        and is_state('input_boolean.hems_ev_worker_session_active', 'off')
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_charger_connected', 'on'
+        )
+        and charger_charging
+        and is_state(
+          'binary_sensor.solaredge_ev_charger_ev_excess_solar_enabled', 'on'
+        )
+        and states(
+          'sensor.solaredge_ev_charger_ev_excess_solar_status'
+        ) | lower == 'enabled'
+      %}
+      {{
+        not observed_unowned_native
+        or (
+          desired_mode == 'backup'
+          and desired_reserve | float >= 99.5
+        )
+      }}
+
+  - condition: template
+    alias: Periodic retries require a stable request for ten minutes
+    value_template: >-
+      {% if trigger is defined and trigger.id == 'periodic_reconcile' %}
+        {% set changed = [
+          as_timestamp(
+            states.input_boolean.automatic_grid_charging_enabled.last_changed
+          ),
+          as_timestamp(
+            states.input_boolean.hems_powerwall_manual_override.last_changed
+          ),
+          as_timestamp(
+            states.sensor.hems_coordinated_powerwall_mode.last_changed
+          ),
+          as_timestamp(
+            states.sensor.hems_coordinated_powerwall_reserve.last_changed
+          ),
+          as_timestamp(states.input_number.minimum_power_reserve.last_changed),
+          as_timestamp(
+            states.sensor.hems_ev_powerwall_interlock_request.last_changed
+          ),
+          as_timestamp(
+            states.sensor.hems_powerwall_grid_charge_plan.last_changed
+          ),
+          as_timestamp(
+            states.input_select.hems_native_excess_supervisor_state.last_changed
+          )
+        ] | max %}
+        {{ (as_timestamp(now()) - changed) >= 600 }}
+      {% else %}
+        true
+      {% endif %}
+
+  - condition: template
+    alias: A physical mode or reserve change is required
+    value_template: >-
+      {% set current_mode = states(
+        'select.house_home_energy_gateway_teslemetry_operation_mode'
+      ) %}
+      {% set current_reserve = states(
+        'number.house_home_energy_gateway_teslemetry_backup_reserve'
+      ) | float %}
+      {{
+        current_mode != desired_mode
+        or ((current_reserve - (desired_reserve | float)) | abs >= 0.5)
+      }}
+
   - choose:
       - conditions:
           - condition: template
-            value_template: >-
-              {% set current = states(
-                'number.house_home_energy_gateway_teslemetry_backup_reserve'
-              ) | float %}
-              {{ (current - (desired_reserve | float)) | abs >= 0.5 }}
+            value_template: "{{ desired_mode == 'backup' }}"
         sequence:
-          - action: number.set_value
-            target:
-              entity_id: >-
-                number.house_home_energy_gateway_teslemetry_backup_reserve
-            data:
-              value: "{{ desired_reserve | float }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {% set actual = states(
+                        'number.house_home_energy_gateway_teslemetry_backup_reserve'
+                      ) | float %}
+                      {{
+                        (actual - (desired_reserve | float)) | abs >= 0.5
+                      }}
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: >-
+                        number.house_home_energy_gateway_teslemetry_backup_reserve
+                    data:
+                      value: "{{ desired_reserve | float }}"
 
-          - delay: "00:00:45"
+          - delay: "00:00:10"
+
+          - condition: template
+            alias: Backup request is still current before mode command
+            value_template: >-
+              {% set live_auto = is_state(
+                'input_boolean.automatic_grid_charging_enabled',
+                'on'
+              ) %}
+              {% set live_mode = states(
+                'sensor.hems_coordinated_powerwall_mode'
+              ) if live_auto else 'self_consumption' %}
+              {% set live_reserve_raw = states(
+                'sensor.hems_coordinated_powerwall_reserve'
+              ) if live_auto else states(
+                'input_number.minimum_power_reserve'
+              ) %}
+              {{
+                is_state(
+                  'input_boolean.hems_powerwall_manual_override',
+                  'off'
+                )
+                and live_auto == automatic_control_enabled
+                and live_mode == desired_mode
+                and is_number(live_reserve_raw)
+                and (
+                  ((live_reserve_raw | float) - (desired_reserve | float))
+                    | abs < 0.5
+                )
+                and states('sensor.hems_ev_powerwall_interlock_request')
+                  == interlock_request
+              }}
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        states(
+                          'select.house_home_energy_gateway_teslemetry_operation_mode'
+                        ) != desired_mode
+                      }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: >-
+                        select.house_home_energy_gateway_teslemetry_operation_mode
+                    data:
+                      option: "{{ desired_mode }}"
+
+      - conditions:
+          - condition: template
+            value_template: "{{ desired_mode == 'self_consumption' }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{
+                        states(
+                          'select.house_home_energy_gateway_teslemetry_operation_mode'
+                        ) != desired_mode
+                      }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: >-
+                        select.house_home_energy_gateway_teslemetry_operation_mode
+                    data:
+                      option: "{{ desired_mode }}"
+
+          - delay: "00:00:10"
+
+          - condition: template
+            alias: Self Consumption request is still current before reserve command
+            value_template: >-
+              {% set live_auto = is_state(
+                'input_boolean.automatic_grid_charging_enabled',
+                'on'
+              ) %}
+              {% set live_mode = states(
+                'sensor.hems_coordinated_powerwall_mode'
+              ) if live_auto else 'self_consumption' %}
+              {% set live_reserve_raw = states(
+                'sensor.hems_coordinated_powerwall_reserve'
+              ) if live_auto else states(
+                'input_number.minimum_power_reserve'
+              ) %}
+              {{
+                is_state(
+                  'input_boolean.hems_powerwall_manual_override',
+                  'off'
+                )
+                and live_auto == automatic_control_enabled
+                and live_mode == desired_mode
+                and is_number(live_reserve_raw)
+                and (
+                  ((live_reserve_raw | float) - (desired_reserve | float))
+                    | abs < 0.5
+                )
+                and states('sensor.hems_ev_powerwall_interlock_request')
+                  == interlock_request
+              }}
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {% set actual = states(
+                        'number.house_home_energy_gateway_teslemetry_backup_reserve'
+                      ) | float %}
+                      {{
+                        (actual - (desired_reserve | float)) | abs >= 0.5
+                      }}
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: >-
+                        number.house_home_energy_gateway_teslemetry_backup_reserve
+                    data:
+                      value: "{{ desired_reserve | float }}"
+
+  - wait_template: >-
+      {% set actual_mode = states(
+        'select.house_home_energy_gateway_teslemetry_operation_mode'
+      ) %}
+      {% set actual_reserve = states(
+        'number.house_home_energy_gateway_teslemetry_backup_reserve'
+      ) %}
+      {% set live_auto = is_state(
+        'input_boolean.automatic_grid_charging_enabled',
+        'on'
+      ) %}
+      {% set live_mode = states(
+        'sensor.hems_coordinated_powerwall_mode'
+      ) if live_auto else 'self_consumption' %}
+      {% set live_reserve_raw = states(
+        'sensor.hems_coordinated_powerwall_reserve'
+      ) if live_auto else states('input_number.minimum_power_reserve') %}
+      {% set superseded =
+        is_state('input_boolean.hems_powerwall_manual_override', 'on')
+        or live_auto != automatic_control_enabled
+        or live_mode != desired_mode
+        or not is_number(live_reserve_raw)
+        or (
+          is_number(live_reserve_raw)
+          and (
+            ((live_reserve_raw | float) - (desired_reserve | float))
+              | abs >= 0.5
+          )
+        )
+        or states('sensor.hems_ev_powerwall_interlock_request')
+          != interlock_request
+      %}
+      {{
+        superseded
+        or (
+          actual_mode == desired_mode
+          and is_number(actual_reserve)
+          and (
+            ((actual_reserve | float) - (desired_reserve | float))
+              | abs < 0.5
+          )
+        )
+      }}
+    timeout: "00:04:00"
+    continue_on_timeout: true
 
   - condition: template
-    alias: Captured request is still current after reserve settling
+    alias: Captured request remains current after authoritative settling
     value_template: >-
       {% set live_auto = is_state(
         'input_boolean.automatic_grid_charging_enabled',
@@ -266,27 +480,33 @@ actions:
                 ) | float | round(0) | int }}%. Brain mode: {{ brain_mode }}.
                 Coordinated mode: {{ coordinated_mode }} at
                 {{ coordinated_reserve_raw }}%. EV interlock:
-                {{ interlock_request }}. Automatic control enabled:
+                {{ interlock_request }}. Powerwall plan: {{ powerwall_plan }}.
+                Native excess supervisor: {{ native_excess_state }}.
+                Automatic control enabled:
                 {{ automatic_control_enabled }}.
               data:
                 tag: hems_powerwall_worker_status
-                alert_once: true
+                ttl: 3600
     default:
       - action: notify.mobile_app_primary_phone
         continue_on_error: true
         data:
           title: HEMS Powerwall setting not confirmed
           message: >-
-            The requested Powerwall mode/reserve did not remain confirmed after
-            authoritative readback. Requested: {{ desired_mode }} at
+            The requested Powerwall mode/reserve was sent once but did not
+            remain confirmed within the four-minute authoritative readback
+            window. Requested: {{ desired_mode }} at
             {{ desired_reserve | float | round(0) | int }}%. Actual:
             {{ states(
               'select.house_home_energy_gateway_teslemetry_operation_mode'
             ) }} at {{ states(
               'number.house_home_energy_gateway_teslemetry_backup_reserve'
-            ) }}%. No repeated command was sent.
+            ) }}%. HEMS will wait for a guarded reconciliation rather than
+            repeatedly issuing commands.
           data:
             tag: hems_powerwall_worker_status
-            alert_once: true
-mode: restart
+            ttl: 3600
+
+mode: queued
+max: 2
 max_exceeded: silent

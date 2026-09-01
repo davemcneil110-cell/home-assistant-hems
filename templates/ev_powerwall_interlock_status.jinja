@@ -17,13 +17,15 @@
   'REQUEST_CHEAP_GRID_HOLD_ONLY',
   'REQUEST_URGENT_HOLD_ONLY',
   'REQUEST_APPROVED_HOLD_ONLY',
-  'REQUEST_EARLY_FLEXIBLE_DISCHARGE'
+  'REQUEST_EARLY_FLEXIBLE_DISCHARGE',
+  'REQUEST_NATIVE_EXCESS_HOLD_100'
 ] %}
+{% set native_request = request == 'REQUEST_NATIVE_EXCESS_HOLD_100' %}
 
 {% if session_active not in ['on', 'off'] %}
   INPUT_UNAVAILABLE
 
-{% elif session_active == 'off' %}
+{% elif session_active == 'off' and not native_request %}
   NOT_REQUESTED
 
 {% elif is_state('input_boolean.hems_powerwall_manual_override', 'on') %}
@@ -50,11 +52,8 @@
   DEVICE_UNAVAILABLE
 
 {% elif actual_mode == desired_mode
-      and (
-        (
-          (actual_reserve_raw | float) - (desired_reserve_raw | float)
-        ) | abs
-      ) < 0.5 %}
+      and (((actual_reserve_raw | float)
+        - (desired_reserve_raw | float)) | abs) < 0.5 %}
   READY
 
 {% else %}

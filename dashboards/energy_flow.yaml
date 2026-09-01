@@ -1102,7 +1102,7 @@ views:
 
           - type: tile
             entity: input_boolean.hems_daily_summary_notifications_enabled
-            name: Daily Summary to Dave
+            name: Daily Summary
             icon: mdi:message-badge-outline
             color: blue
 

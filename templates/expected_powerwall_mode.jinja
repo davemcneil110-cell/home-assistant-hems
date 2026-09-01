@@ -1,57 +1,24 @@
-{% set soc_value =
-  states('sensor.hems_effective_powerwall')
-%}
+{# Full state template. Revised 2026-08-01.
+   The planner distinguishes a no-discharge hold from intentional charging. #}
+{% set plan = states('sensor.hems_powerwall_grid_charge_plan') %}
 
-{% set target_value =
-  states('input_number.powerwall_target')
-%}
+{% if plan in [
+  'HOLD_FOR_CHEAPER_GRID',
+  'HOLD_FORECAST_UNAVAILABLE',
+  'TARGET_AT_RISK_PRICE_TOO_HIGH',
+  'CHARGE_CHEAPEST_VISIBLE',
+  'CHARGE_LATEST_SAFE_START'
+] %}
+  backup
 
-{% set grid_required_value =
-  states('sensor.hems_effective_grid_energy_required')
-%}
+{% elif plan in [
+  'MIDNIGHT_ROLLOVER_GUARD',
+  'TARGET_MET',
+  'NO_DAILY_SHORTFALL',
+  'DEADLINE_PASSED_WITH_SHORTFALL'
+] %}
+  self_consumption
 
-{% set import_price_value =
-  states('sensor.hems_effective_import_price')
-%}
-
-{% set effective_price_limit_value =
-  states('sensor.hems_effective_grid_charge_price_limit')
-%}
-
-{% if
-  not is_number(soc_value)
-  or not is_number(target_value)
-  or not is_number(grid_required_value)
-  or not is_number(import_price_value)
-  or not is_number(effective_price_limit_value)
-%}
-  hold
 {% else %}
-  {% set powerwall_percentage = soc_value | float %}
-  {% set powerwall_target = target_value | float %}
-  {% set grid_required = grid_required_value | float %}
-  {% set import_price = import_price_value | float %}
-  {% set effective_price_limit = effective_price_limit_value | float %}
-
-  {% set below_target =
-    powerwall_percentage < powerwall_target
-  %}
-
-  {% set daily_shortfall =
-    grid_required > 1
-  %}
-
-  {% set permitted_grid_available =
-    import_price <= effective_price_limit
-  %}
-
-  {% if
-    below_target
-    and daily_shortfall
-    and permitted_grid_available
-  %}
-    backup
-  {% else %}
-    self_consumption
-  {% endif %}
+  hold
 {% endif %}
